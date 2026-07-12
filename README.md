@@ -115,4 +115,3 @@ adb install app-debug.apk
 ---
 
 **祝您的大屏设备拍摄愉快！**
-```
