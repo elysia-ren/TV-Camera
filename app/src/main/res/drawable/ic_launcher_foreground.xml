@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 背景圆形 -->
+    <path
+        android:fillColor="#1A1A2E"
+        android:pathData="M54,54m-50,0a50,50 0,1 1,100 0a50,50 0,1 1,-100 0" />
+
+    <!-- 相机机身 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M28,40 L38,40 L42,34 L66,34 L70,40 L80,40 C82,40 84,42 84,44 L84,68 C84,70 82,72 80,72 L28,72 C26,72 24,70 24,68 L24,44 C24,42 26,40 28,40Z" />
+
+    <!-- 镜头外圈 -->
+    <path
+        android:fillColor="#1A1A2E"
+        android:pathData="M54,56m-14,0a14,14 0,1 1,28 0a14,14 0,1 1,-28 0" />
+
+    <!-- 镜头内圈 -->
+    <path
+        android:fillColor="#E94560"
+        android:pathData="M54,56m-8,0a8,8 0,1 1,16 0a8,8 0,1 1,-16 0" />
+
+    <!-- 镜头高光 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M50,52m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0"
+        android:fillAlpha="0.6" />
+
+    <!-- 闪光灯 -->
+    <path
+        android:fillColor="#E94560"
+        android:pathData="M70,44 L74,44 L74,48 L70,48Z" />
+</vector>
