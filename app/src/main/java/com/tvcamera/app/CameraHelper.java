@@ -116,37 +116,21 @@ public class CameraHelper {
     }
 
     /**
-     * 选择最佳分辨率：优先 1920x1080，其次 1280x720，再次 640x480
-     * 如果都不支持，选最大的
+     * 选择最佳分辨率：按面积取最大值
      */
     public static Size chooseBestSize(Size[] sizes) {
-        // 优先级：1080p > 720p > 480p > 最大
-        Size best1080 = null;
-        Size best720 = null;
-        Size best480 = null;
-        Size largest = null;
-
+        if (sizes == null || sizes.length == 0) {
+            return new Size(640, 480);
+        }
+        Size largest = sizes[0];
         for (Size size : sizes) {
-            int w = size.getWidth();
-            int h = size.getHeight();
-
-            if (largest == null || w * h > largest.getWidth() * largest.getHeight()) {
+            long area = (long) size.getWidth() * size.getHeight();
+            long largestArea = (long) largest.getWidth() * largest.getHeight();
+            if (area > largestArea) {
                 largest = size;
             }
-
-            if (w == 1920 && h == 1080) {
-                best1080 = size;
-            } else if (w == 1280 && h == 720) {
-                best720 = size;
-            } else if (w == 640 && h == 480) {
-                best480 = size;
-            }
         }
-
-        if (best1080 != null) return best1080;
-        if (best720 != null) return best720;
-        if (best480 != null) return best480;
-        return largest != null ? largest : new Size(640, 480);
+        return largest;
     }
 
     /**

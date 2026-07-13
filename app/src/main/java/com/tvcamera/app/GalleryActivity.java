@@ -99,7 +99,20 @@ public class GalleryActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (initialLoadDone) loadMedia();
+        if (initialLoadDone) {
+            // 延迟加载，等 MediaStore 索引完成；若为空则重试
+            loadMediaWithRetry(0);
+        }
+    }
+
+    /** 带重试的加载：最多重试3次，间隔800ms */
+    private void loadMediaWithRetry(int attempt) {
+        thumbnailGrid.postDelayed(() -> {
+            loadMedia();
+            if (mediaItems.isEmpty() && attempt < 3) {
+                loadMediaWithRetry(attempt + 1);
+            }
+        }, attempt == 0 ? 300 : 800);
     }
 
     @Override
@@ -146,8 +159,8 @@ public class GalleryActivity extends Activity {
                 MediaStore.Images.Media.SIZE,
                 MediaStore.Images.Media.DATE_MODIFIED
         };
-        String photoSelection = MediaStore.Images.Media.RELATIVE_PATH + " = ?";
-        String[] photoArgs = {Environment.DIRECTORY_DCIM + "/TVCamera"};
+        String photoSelection = MediaStore.Images.Media.RELATIVE_PATH + " LIKE ?";
+        String[] photoArgs = {Environment.DIRECTORY_DCIM + "/TVCamera%"};
 
         try (Cursor cursor = resolver.query(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
@@ -179,8 +192,8 @@ public class GalleryActivity extends Activity {
                 MediaStore.Video.Media.DATE_MODIFIED,
                 MediaStore.Video.Media.DURATION
         };
-        String videoSelection = MediaStore.Video.Media.RELATIVE_PATH + " = ?";
-        String[] videoArgs = {Environment.DIRECTORY_DCIM + "/TVCamera"};
+        String videoSelection = MediaStore.Video.Media.RELATIVE_PATH + " LIKE ?";
+        String[] videoArgs = {Environment.DIRECTORY_DCIM + "/TVCamera%"};
 
         try (Cursor cursor = resolver.query(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,

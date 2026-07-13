@@ -38,6 +38,10 @@ public class ImageProcessor {
     // 缓存的 CLAHE 对象（避免每帧创建）
     private CLAHE claheInstance;
 
+    // 预分配的临时对象（避免每帧分配）
+    private Mat sharpenKernel;
+    private float[] sharpenKernelData;
+
     private QualityPreferences prefs;
 
     // FPS 统计
@@ -78,6 +82,11 @@ public class ImageProcessor {
         tempMat = new Mat(height, width, CvType.CV_8UC3);
         claheMat = new Mat();
         claheInstance = Imgproc.createCLAHE(2.0, new Size(8, 8));
+
+        // 预分配锐化卷积核
+        sharpenKernel = org.opencv.core.Mat.eye(3, 3, CvType.CV_32F);
+        sharpenKernelData = new float[9];
+
         outputBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         Log.i(TAG, "Mat 已分配: " + width + "x" + height);
     }
@@ -198,7 +207,7 @@ public class ImageProcessor {
         }
     }
 
-    /** 锐化 - filter2D */
+    /** 锐化 - filter2D（预分配卷积核复用） */
     private void applySharpen(Mat src) {
         try {
             int level = prefs.getSharpenLevel();
@@ -208,20 +217,43 @@ public class ImageProcessor {
                 case 2: center = 2.0f; break;
                 default: center = 1.2f;
             }
-            org.opencv.core.Mat kernel = org.opencv.core.Mat.eye(3, 3, CvType.CV_32F);
-            float[] kd = new float[9];
-            kernel.get(0, 0, kd);
-            float e = -0.1f;
-            kd[0] = e; kd[1] = e; kd[2] = e;
-            kd[3] = e; kd[4] = center; kd[5] = e;
-            kd[6] = e; kd[7] = e; kd[8] = e;
-            kernel.put(0, 0, kd);
+            java.util.Arrays.fill(sharpenKernelData, -0.1f);
+            sharpenKernelData[4] = center;
+            sharpenKernel.put(0, 0, sharpenKernelData);
 
-            Imgproc.filter2D(src, tempMat, -1, kernel);
+            Imgproc.filter2D(src, tempMat, -1, sharpenKernel);
             tempMat.copyTo(src);
-            kernel.release();
         } catch (Exception e) {
             Log.w(TAG, "锐化失败", e);
+        }
+    }
+
+    /**
+     * 拍照专用：强制应用所有画质优化（包括降噪和锐化），无视分辨率限制
+     */
+    public Bitmap processFrameForCapture(byte[] nv21Data, int width, int height) {
+        if (!opencvInitialized || nv21Data == null) return null;
+        try {
+            if (yuvMat == null || yuvMat.rows() != height + height / 2) {
+                prepare(width, height);
+            }
+            yuvMat.put(0, 0, nv21Data);
+            Imgproc.cvtColor(yuvMat, rgbMat, Imgproc.COLOR_YUV2RGB_NV21);
+            rgbMat.copyTo(processedMat);
+
+            // 强制应用所有优化（不检查分辨率限制）
+            if (prefs.isWhiteBalance()) applyWhiteBalance(processedMat);
+            if (prefs.isClahe()) applyClahe(processedMat);
+            if (prefs.isBrightness()) applyBrightness(processedMat);
+            if (prefs.isDenoise()) applyDenoise(processedMat);
+            if (prefs.isSharpen()) applySharpen(processedMat);
+
+            Bitmap result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            Utils.matToBitmap(processedMat, result);
+            return result;
+        } catch (Exception e) {
+            Log.e(TAG, "拍照画质处理失败", e);
+            return null;
         }
     }
 
@@ -248,6 +280,7 @@ public class ImageProcessor {
         if (processedMat != null) { processedMat.release(); processedMat = null; }
         if (tempMat != null) { tempMat.release(); tempMat = null; }
         if (claheMat != null) { claheMat.release(); claheMat = null; }
+        if (sharpenKernel != null) { sharpenKernel.release(); sharpenKernel = null; }
         claheInstance = null;
         outputBitmap = null;
     }

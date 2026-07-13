@@ -54,7 +54,6 @@ import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -114,9 +113,11 @@ public class CameraActivity extends Activity {
     private volatile boolean isPreviewing = false;
     private volatile boolean isOpening = false;
     private CameraPreferences preferences;
+    private ResolutionPreferences resolutionPrefs;
 
     private Runnable fpsUpdateRunnable;
     private Surface cachedRenderSurface;
+    private volatile CountDownLatch videoSaveLatch = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -125,6 +126,7 @@ public class CameraActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         preferences = new CameraPreferences(this);
+        resolutionPrefs = new ResolutionPreferences(this);
         qualityPrefs = new QualityPreferences(this);
 
         cameraId = getIntent().getStringExtra("camera_id");
@@ -317,6 +319,11 @@ public class CameraActivity extends Activity {
             refreshQualityPanel();
         });
 
+        // 分辨率切换
+        panel.findViewById(R.id.toggle_resolution).setOnClickListener(v -> {
+            showResolutionDialog();
+        });
+
         refreshQualityPanel();
     }
 
@@ -343,6 +350,75 @@ public class CameraActivity extends Activity {
                 qualityPrefs.isRecordOptimized() ? "✅" : "❌");
         ((TextView) panel.findViewById(R.id.value_fps)).setText(
                 qualityPrefs.isShowFps() ? "✅" : "❌");
+
+        // 分辨率显示
+        Size currentRes = resolutionPrefs.getResolution(cameraId);
+        if (currentRes != null && currentRes.getWidth() > 0 && currentRes.getHeight() > 0) {
+            ((TextView) panel.findViewById(R.id.value_resolution)).setText(
+                    currentRes.getWidth() + "x" + currentRes.getHeight());
+        } else {
+            ((TextView) panel.findViewById(R.id.value_resolution)).setText("自动");
+        }
+    }
+
+    /** 弹出分辨率选择列表 */
+    private void showResolutionDialog() {
+        if (cameraId == null) return;
+        CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
+        try {
+            CameraCharacteristics chars = manager.getCameraCharacteristics(cameraId);
+            android.hardware.camera2.params.StreamConfigurationMap map =
+                    chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            if (map == null) return;
+            Size[] sizes = map.getOutputSizes(chosenImageFormat);
+            if (sizes == null || sizes.length == 0) return;
+
+            // 按面积降序排列
+            java.util.List<Size> sorted = new java.util.ArrayList<>(java.util.Arrays.asList(sizes));
+            java.util.Collections.sort(sorted, (a, b) ->
+                    Long.compare((long) b.getWidth() * b.getHeight(), (long) a.getWidth() * a.getHeight()));
+
+            // 构建选项列表：自动 + 各分辨率
+            java.util.List<String> labels = new java.util.ArrayList<>();
+            labels.add("自动（最大分辨率）");
+            for (Size s : sorted) {
+                labels.add(s.getWidth() + "x" + s.getHeight());
+            }
+
+            // 当前选中项
+            Size current = resolutionPrefs.getResolution(cameraId);
+            int checked = 0; // 默认选中"自动"
+            if (current != null && current.getWidth() > 0) {
+                for (int i = 0; i < sorted.size(); i++) {
+                    if (sorted.get(i).getWidth() == current.getWidth()
+                            && sorted.get(i).getHeight() == current.getHeight()) {
+                        checked = i + 1;
+                        break;
+                    }
+                }
+            }
+
+            new AlertDialog.Builder(this)
+                    .setTitle("选择分辨率")
+                    .setSingleChoiceItems(labels.toArray(new String[0]), checked, (dialog, which) -> {
+                        if (which == 0) {
+                            resolutionPrefs.saveResolution(cameraId, 0, 0);
+                        } else {
+                            Size chosen = sorted.get(which - 1);
+                            resolutionPrefs.saveResolution(cameraId, chosen.getWidth(), chosen.getHeight());
+                        }
+                        dialog.dismiss();
+                        // 重新打开摄像头应用新分辨率
+                        closeCamera();
+                        openCamera();
+                        // 刷新面板显示
+                        refreshQualityPanel();
+                    })
+                    .setNegativeButton("取消", null)
+                    .show();
+        } catch (CameraAccessException e) {
+            Log.e(TAG, "获取分辨率列表失败", e);
+        }
     }
 
     // ==================== 录像 ====================
@@ -366,9 +442,6 @@ public class CameraActivity extends Activity {
             @Override
             public void onRecordingStopped(String filePath) {
                 isRecordingVideo = false;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    new Thread(() -> saveVideoToMediaStore(filePath)).start();
-                }
                 runOnUiThread(() -> {
                     recordButton.setText("🎥 录像");
                     captureButton.setEnabled(true);
@@ -376,9 +449,23 @@ public class CameraActivity extends Activity {
                     recordingDot.setVisibility(View.GONE);
                     recordingTime.setVisibility(View.GONE);
                     stopRecordingTimer();
-                    Toast.makeText(CameraActivity.this, "录像已保存", Toast.LENGTH_SHORT).show();
                     updateStorageDisplay();
                 });
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    final CountDownLatch latch = new CountDownLatch(1);
+                    videoSaveLatch = latch;
+                    new Thread(() -> {
+                        try {
+                            saveVideoToMediaStore(filePath);
+                            runOnUiThread(() -> Toast.makeText(CameraActivity.this, "录像已保存", Toast.LENGTH_SHORT).show());
+                        } finally {
+                            latch.countDown();
+                            videoSaveLatch = null;
+                        }
+                    }).start();
+                } else {
+                    runOnUiThread(() -> Toast.makeText(CameraActivity.this, "录像已保存", Toast.LENGTH_SHORT).show());
+                }
             }
 
             @Override
@@ -417,6 +504,11 @@ public class CameraActivity extends Activity {
     @Override
     protected void onPause() {
         if (isRecordingVideo) videoRecorder.stopRecording();
+        // 等待视频保存完成（最多 5 秒）
+        CountDownLatch latch = videoSaveLatch;
+        if (latch != null) {
+            try { latch.await(5, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+        }
         closeCamera();
         stopBackgroundThread();
         super.onPause();
@@ -488,7 +580,10 @@ public class CameraActivity extends Activity {
 
     private final TextureView.SurfaceTextureListener surfaceTextureListener =
             new TextureView.SurfaceTextureListener() {
-                @Override public void onSurfaceTextureAvailable(SurfaceTexture s, int w, int h) { openCamera(); }
+                @Override public void onSurfaceTextureAvailable(SurfaceTexture s, int w, int h) {
+                    openCamera();
+                    applyPreviewTransform();
+                }
                 @Override public void onSurfaceTextureSizeChanged(SurfaceTexture s, int w, int h) { configureTransform(w, h); }
                 @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture s) { return true; }
                 @Override public void onSurfaceTextureUpdated(SurfaceTexture s) {}
@@ -509,7 +604,21 @@ public class CameraActivity extends Activity {
             chosenImageFormat = chooseImageFormat(map);
             Size[] outputSizes = map.getOutputSizes(chosenImageFormat);
             if (outputSizes != null && outputSizes.length > 0) {
-                previewSize = chooseBestSize(outputSizes);
+                // 优先使用用户选择的分辨率
+                Size userChoice = resolutionPrefs.getResolution(cameraId);
+                if (userChoice != null && userChoice.getWidth() > 0 && userChoice.getHeight() > 0) {
+                    boolean found = false;
+                    for (Size s : outputSizes) {
+                        if (s.getWidth() == userChoice.getWidth() && s.getHeight() == userChoice.getHeight()) {
+                            previewSize = s;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) previewSize = chooseBestSize(outputSizes);
+                } else {
+                    previewSize = chooseBestSize(outputSizes);
+                }
             } else {
                 previewSize = new Size(requestedWidth, requestedHeight);
             }
@@ -560,7 +669,9 @@ public class CameraActivity extends Activity {
 
     private final CameraDevice.StateCallback stateCallback = new CameraDevice.StateCallback() {
         @Override public void onOpened(CameraDevice camera) {
-            cameraDevice = camera; isOpening = false; createPreviewSession();
+            cameraDevice = camera; isOpening = false;
+            // 等视图布局完成后再创建预览会话
+            previewView.post(() -> createPreviewSession());
         }
         @Override public void onDisconnected(CameraDevice camera) {
             camera.close(); cameraDevice = null; isOpening = false; isPreviewing = false;
@@ -581,23 +692,39 @@ public class CameraActivity extends Activity {
     // ==================== 预览会话 ====================
 
     private void createPreviewSession() {
+        // 确保视图已布局
+        previewView.post(() -> {
         try {
             SurfaceTexture texture = previewView.getSurfaceTexture();
             if (texture == null) return;
-            texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
+            // 在创建 Surface 之前设置 buffer 为视图尺寸
+            int viewW = previewView.getWidth();
+            int viewH = previewView.getHeight();
+            if (viewW > 0 && viewH > 0) {
+                texture.setDefaultBufferSize(viewW, viewH);
+            } else {
+                // 降级：使用屏幕分辨率
+                android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
+                getWindowManager().getDefaultDisplay().getMetrics(metrics);
+                texture.setDefaultBufferSize(metrics.widthPixels, metrics.heightPixels);
+            }
             Surface previewSurface = new Surface(texture);
             Surface readerSurface = imageReader.getSurface();
 
             boolean optimizationOn = imageProcessor != null && qualityPrefs.isEnabled();
 
             previewBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
-            previewBuilder.addTarget(previewSurface);
             if (optimizationOn) {
+                // 优化开启：只输出到 ImageReader，TextureView 由 Canvas 绘制
                 previewBuilder.addTarget(readerSurface);
+            } else {
+                // 优化关闭：只输出到 TextureView
+                previewBuilder.addTarget(previewSurface);
             }
             previewBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
             previewBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
 
+            // 会话包含所有 Surface，但预览请求只输出到需要的那个
             List<Surface> surfaces = Arrays.asList(previewSurface, readerSurface);
             cameraDevice.createCaptureSession(surfaces, new CameraCaptureSession.StateCallback() {
                 @Override public void onConfigured(CameraCaptureSession session) {
@@ -606,7 +733,7 @@ public class CameraActivity extends Activity {
                         session.setRepeatingRequest(previewBuilder.build(), null, backgroundHandler);
                         isPreviewing = true;
                         runOnUiThread(() -> {
-                            configureTransform(previewView.getWidth(), previewView.getHeight());
+                            applyPreviewTransform();
                             // 预览启动后开始控制栏隐藏计时
                             startHideTimer();
                         });
@@ -618,6 +745,7 @@ public class CameraActivity extends Activity {
                 }
             }, backgroundHandler);
         } catch (CameraAccessException e) { Log.e(TAG, "创建预览会话失败", e); }
+        }); // end previewView.post
     }
 
     // ==================== ImageReader 回调 ====================
@@ -626,17 +754,48 @@ public class CameraActivity extends Activity {
         Image image = reader.acquireLatestImage();
         if (image == null) return;
         try {
-            if (chosenImageFormat == ImageFormat.YUV_420_888 && imageProcessor != null && qualityPrefs.isEnabled()) {
+            boolean optimizationOn = imageProcessor != null && qualityPrefs.isEnabled();
+            if (optimizationOn && chosenImageFormat == ImageFormat.YUV_420_888) {
+                // 优化开启：OpenCV 处理后渲染
                 byte[] nv21 = YuvToNv21Converter.yuv420ToNv21(image);
                 Bitmap processed = imageProcessor.processFrame(nv21, image.getWidth(), image.getHeight());
                 if (processed != null) renderToTextureView(processed);
+            } else {
+                // 优化关闭但预览走 readerSurface：直接用原始帧渲染
+                Bitmap raw = imageToBitmap(image);
+                if (raw != null) renderToTextureView(raw);
             }
         } finally {
             image.close();
         }
     };
 
+    /** 将 Image 转换为 Bitmap（用于优化关闭时的 Canvas 渲染） */
+    private Bitmap imageToBitmap(Image image) {
+        try {
+            if (image.getFormat() == ImageFormat.JPEG) {
+                ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+                byte[] bytes = new byte[buffer.remaining()];
+                buffer.get(bytes);
+                return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            } else {
+                // YUV_420_888 → NV21 → Bitmap
+                byte[] nv21 = YuvToNv21Converter.yuv420ToNv21(image);
+                YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                yuvImage.compressToJpeg(new Rect(0, 0, image.getWidth(), image.getHeight()), 90, baos);
+                byte[] jpeg = baos.toByteArray();
+                baos.close();
+                return android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "imageToBitmap失败", e);
+            return null;
+        }
+    }
+
     private void renderToTextureView(Bitmap bitmap) {
+        if (bitmap == null) return;
         mainHandler.post(() -> {
             try {
                 SurfaceTexture surfaceTexture = previewView.getSurfaceTexture();
@@ -647,7 +806,7 @@ public class CameraActivity extends Activity {
                 Canvas canvas = null;
                 try {
                     canvas = cachedRenderSurface.lockCanvas(null);
-                    if (canvas != null) {
+                    if (canvas != null && canvas.getWidth() > 0 && canvas.getHeight() > 0) {
                         canvas.drawColor(android.graphics.Color.BLACK);
                         float scaleX = (float) canvas.getWidth() / bitmap.getWidth();
                         float scaleY = (float) canvas.getHeight() / bitmap.getHeight();
@@ -663,7 +822,7 @@ public class CameraActivity extends Activity {
                     if (canvas != null) cachedRenderSurface.unlockCanvasAndPost(canvas);
                 }
             } catch (Exception e) {
-                Log.w(TAG, "渲染失败", e);
+                Log.w(TAG, "渲染失败，重建Surface", e);
                 cachedRenderSurface = null;
             }
         });
@@ -714,6 +873,20 @@ public class CameraActivity extends Activity {
     }
 
     private byte[] captureYuvAndCompress() throws CameraAccessException, InterruptedException, IOException {
+        // 1. 停止预览，防止预览帧干扰拍照
+        captureSession.stopRepeating();
+        // 2. 同步刷新管线：发一个单拍请求，同步等它完成，确保残留帧全部消费
+        final CountDownLatch flushLatch = new CountDownLatch(1);
+        imageReader.setOnImageAvailableListener(reader -> {
+            Image img = reader.acquireLatestImage();
+            if (img != null) img.close();
+            flushLatch.countDown();
+        }, backgroundHandler);
+        captureSession.capture(previewBuilder.build(), null, backgroundHandler);
+        flushLatch.await(2, TimeUnit.SECONDS);
+        Thread.sleep(50);
+
+        // 3. 设置拍照 listener，此时不会有新帧到来
         final CountDownLatch latch = new CountDownLatch(1);
         final byte[][] result = new byte[1][];
         final int[] dims = new int[2];
@@ -734,16 +907,45 @@ public class CameraActivity extends Activity {
 
         boolean received = latch.await(3, TimeUnit.SECONDS);
         imageReader.setOnImageAvailableListener(imageAvailableListener, backgroundHandler);
+        resumePreview();
         if (!received || result[0] == null) return null;
 
-        YuvImage yuvImage = new YuvImage(result[0], ImageFormat.NV21, dims[0], dims[1], null);
+        // 判断是否开启“保存优化后图片”
+        if (qualityPrefs.isSaveOptimized() && imageProcessor != null) {
+            Bitmap optimized = imageProcessor.processFrameForCapture(result[0], dims[0], dims[1]);
+            if (optimized != null) {
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                optimized.compress(Bitmap.CompressFormat.JPEG, 100, baos);
+                byte[] jpeg = baos.toByteArray();
+                baos.close();
+                optimized.recycle();
+                return jpeg;
+            }
+        }
+        return compressYuvToJpeg(result[0], dims[0], dims[1]);
+    }
+
+    private byte[] compressYuvToJpeg(byte[] nv21, int width, int height) throws IOException {
+        YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, width, height, null);
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        yuvImage.compressToJpeg(new Rect(0, 0, dims[0], dims[1]), 95, baos);
-        byte[] jpeg = baos.toByteArray(); baos.close();
+        yuvImage.compressToJpeg(new Rect(0, 0, width, height), 100, baos);
+        byte[] jpeg = baos.toByteArray();
+        baos.close();
         return jpeg;
     }
 
     private byte[] captureJpeg() throws CameraAccessException, InterruptedException {
+        captureSession.stopRepeating();
+        final CountDownLatch flushLatch = new CountDownLatch(1);
+        imageReader.setOnImageAvailableListener(reader -> {
+            Image img = reader.acquireLatestImage();
+            if (img != null) img.close();
+            flushLatch.countDown();
+        }, backgroundHandler);
+        captureSession.capture(previewBuilder.build(), null, backgroundHandler);
+        flushLatch.await(2, TimeUnit.SECONDS);
+        Thread.sleep(50);
+
         final CountDownLatch latch = new CountDownLatch(1);
         final byte[][] result = new byte[1][];
 
@@ -762,7 +964,19 @@ public class CameraActivity extends Activity {
 
         boolean received = latch.await(3, TimeUnit.SECONDS);
         imageReader.setOnImageAvailableListener(imageAvailableListener, backgroundHandler);
+        resumePreview();
         return (received && result[0] != null) ? result[0] : null;
+    }
+
+    /** 恢复预览 repeating request */
+    private void resumePreview() {
+        try {
+            if (captureSession != null && previewBuilder != null) {
+                captureSession.setRepeatingRequest(previewBuilder.build(), null, backgroundHandler);
+            }
+        } catch (CameraAccessException e) {
+            Log.e(TAG, "恢复预览失败", e);
+        }
     }
 
     // ==================== 录像 ====================
@@ -796,7 +1010,9 @@ public class CameraActivity extends Activity {
         try {
             SurfaceTexture texture = previewView.getSurfaceTexture();
             if (texture == null) return;
-            texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
+            int viewW = previewView.getWidth();
+            int viewH = previewView.getHeight();
+            if (viewW > 0 && viewH > 0) texture.setDefaultBufferSize(viewW, viewH);
             Surface previewSurface = new Surface(texture);
 
             if (captureSession != null) { captureSession.close(); captureSession = null; }
@@ -832,7 +1048,9 @@ public class CameraActivity extends Activity {
         try {
             SurfaceTexture texture = previewView.getSurfaceTexture();
             if (texture == null) return;
-            texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
+            int viewW = previewView.getWidth();
+            int viewH = previewView.getHeight();
+            if (viewW > 0 && viewH > 0) texture.setDefaultBufferSize(viewW, viewH);
             Surface previewSurface = new Surface(texture);
             Surface readerSurface = imageReader.getSurface();
 
@@ -846,11 +1064,15 @@ public class CameraActivity extends Activity {
                     captureSession = session;
                     try {
                         previewBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
-                        previewBuilder.addTarget(previewSurface);
-                        if (optimizationOn) previewBuilder.addTarget(readerSurface);
+                        if (optimizationOn) {
+                            previewBuilder.addTarget(readerSurface);
+                        } else {
+                            previewBuilder.addTarget(previewSurface);
+                        }
                         previewBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
                         previewBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
                         session.setRepeatingRequest(previewBuilder.build(), null, backgroundHandler);
+                        runOnUiThread(() -> applyPreviewTransform());
                     } catch (CameraAccessException e) { Log.e(TAG, "恢复预览失败", e); }
                 }
                 @Override public void onConfigureFailed(CameraCaptureSession session) { Log.e(TAG, "恢复预览失败"); }
@@ -865,6 +1087,9 @@ public class CameraActivity extends Activity {
         if (!photoDir.exists()) photoDir.mkdirs();
         File photoFile = new File(photoDir, "TVCamera_" + timestamp + ".jpg");
         FileOutputStream fos = new FileOutputStream(photoFile); fos.write(jpegData); fos.close();
+        Uri fileUri = Uri.fromFile(photoFile);
+        sendBroadcast(new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, fileUri));
+        getContentResolver().notifyChange(fileUri, null);
         runOnUiThread(() -> Toast.makeText(this, "已保存: " + photoFile.getName(), Toast.LENGTH_SHORT).show());
     }
 
@@ -884,6 +1109,8 @@ public class CameraActivity extends Activity {
             ContentValues update = new ContentValues();
             update.put(MediaStore.Images.Media.IS_PENDING, 0);
             getContentResolver().update(uri, update, null, null);
+            sendBroadcast(new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri));
+            getContentResolver().notifyChange(uri, null);
             runOnUiThread(() -> Toast.makeText(this, "已保存到相册", Toast.LENGTH_SHORT).show());
         } catch (IOException e) {
             getContentResolver().delete(uri, null, null);
@@ -912,6 +1139,8 @@ public class CameraActivity extends Activity {
             ContentValues update = new ContentValues();
             update.put(MediaStore.Video.Media.IS_PENDING, 0);
             getContentResolver().update(uri, update, null, null);
+            sendBroadcast(new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri));
+            getContentResolver().notifyChange(uri, null);
         } catch (IOException e) {
             getContentResolver().delete(uri, null, null);
         } finally { cacheFile.delete(); }
@@ -949,20 +1178,50 @@ public class CameraActivity extends Activity {
         Matrix matrix = new Matrix();
         float scaleX = (float) viewWidth / previewSize.getWidth();
         float scaleY = (float) viewHeight / previewSize.getHeight();
+        // center-crop：填满屏幕，裁剪多余部分，无拉伸
         float scale = Math.max(scaleX, scaleY);
+        float scaledW = previewSize.getWidth() * scale;
+        float scaledH = previewSize.getHeight() * scale;
+        float dx = (viewWidth - scaledW) / 2f;
+        float dy = (viewHeight - scaledH) / 2f;
         matrix.setScale(scale, scale);
-        matrix.postTranslate((viewWidth - previewSize.getWidth() * scale) / 2f,
-                (viewHeight - previewSize.getHeight() * scale) / 2f);
+        matrix.postTranslate(dx, dy);
         previewView.setTransform(matrix);
     }
 
+    /** 在 UI 线程安全地应用预览变换 */
+    private void applyPreviewTransform() {
+        int w = previewView.getWidth();
+        int h = previewView.getHeight();
+        if (w > 0 && h > 0) {
+            configureTransform(w, h);
+            // 同步 SurfaceTexture buffer 为视图大小，确保 Canvas 渲染路径正确缩放
+            SurfaceTexture st = previewView.getSurfaceTexture();
+            if (st != null) st.setDefaultBufferSize(w, h);
+        } else {
+            previewView.post(() -> {
+                int pw = previewView.getWidth();
+                int ph = previewView.getHeight();
+                configureTransform(pw, ph);
+                SurfaceTexture st = previewView.getSurfaceTexture();
+                if (st != null && pw > 0 && ph > 0) st.setDefaultBufferSize(pw, ph);
+            });
+        }
+    }
+
     private Size chooseBestSize(Size[] sizes) {
-        List<Size> sorted = new ArrayList<>(Arrays.asList(sizes));
-        Collections.sort(sorted, (a, b) -> b.getWidth() * b.getHeight() - a.getWidth() * a.getHeight());
-        for (Size s : sorted) if (s.getWidth() == 1920 && s.getHeight() == 1080) return s;
-        for (Size s : sorted) if (s.getWidth() == 1280 && s.getHeight() == 720) return s;
-        for (Size s : sorted) if (s.getWidth() == 640 && s.getHeight() == 480) return s;
-        return sorted.get(0);
+        if (sizes == null || sizes.length == 0) {
+            return new Size(640, 480);
+        }
+        Size largest = sizes[0];
+        for (Size size : sizes) {
+            long area = (long) size.getWidth() * size.getHeight();
+            long largestArea = (long) largest.getWidth() * largest.getHeight();
+            if (area > largestArea) {
+                largest = size;
+            }
+        }
+        return largest;
     }
 
     // ==================== 按键 ====================

@@ -29,6 +29,34 @@
             android:layout_height="wrap_content"
             android:orientation="vertical">
 
+            <!-- 分辨率 -->
+            <LinearLayout
+                android:id="@+id/toggle_resolution"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_card"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="📷 分辨率"
+                    android:textSize="14sp"
+                    android:textColor="#CCCCCC" />
+                <TextView
+                    android:id="@+id/value_resolution"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="自动"
+                    android:textSize="14sp"
+                    android:textColor="#E94560" />
+            </LinearLayout>
+
             <!-- 总开关 -->
             <LinearLayout
                 android:id="@+id/toggle_enabled"
