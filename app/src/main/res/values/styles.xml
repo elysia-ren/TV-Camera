@@ -6,4 +6,10 @@
         <item name="android:colorAccent">@color/colorAccent</item>
         <item name="android:windowBackground">@color/colorPrimary</item>
     </style>
+
+    <!-- 聚焦缩放动画样式 -->
+    <style name="ScaleFocus">
+        <item name="android:focusable">true</item>
+        <item name="android:focusableInTouchMode">true</item>
+    </style>
 </resources>

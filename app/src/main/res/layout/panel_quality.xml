@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="360dp"
+    android:layout_height="match_parent"
+    android:layout_gravity="end"
+    android:orientation="vertical"
+    android:background="#E81A1A2E"
+    android:padding="20dp"
+    android:focusable="true"
+    android:focusableInTouchMode="true">
+
+    <!-- 标题 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="⚙ 画质优化设置"
+        android:textSize="20sp"
+        android:textColor="#FFFFFF"
+        android:textStyle="bold"
+        android:layout_marginBottom="16dp" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <!-- 总开关 -->
+            <LinearLayout
+                android:id="@+id/toggle_enabled"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_card"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="画质优化"
+                    android:textSize="16sp"
+                    android:textColor="#FFFFFF" />
+                <TextView
+                    android:id="@+id/value_enabled"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="✅ 开启"
+                    android:textSize="14sp"
+                    android:textColor="#E94560" />
+            </LinearLayout>
+
+            <!-- 白平衡 -->
+            <LinearLayout
+                android:id="@+id/toggle_white_balance"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_card"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="自动白平衡"
+                    android:textSize="14sp"
+                    android:textColor="#CCCCCC" />
+                <TextView
+                    android:id="@+id/value_white_balance"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="✅"
+                    android:textSize="14sp"
+                    android:textColor="#E94560" />
+            </LinearLayout>
+
+            <!-- CLAHE -->
+            <LinearLayout
+                android:id="@+id/toggle_clahe"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_card"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="对比度增强 (CLAHE)"
+                    android:textSize="14sp"
+                    android:textColor="#CCCCCC" />
+                <TextView
+                    android:id="@+id/value_clahe"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="✅"
+                    android:textSize="14sp"
+                    android:textColor="#E94560" />
+            </LinearLayout>
+
+            <!-- 亮度 -->
+            <LinearLayout
+                android:id="@+id/toggle_brightness"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_card"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="亮度补偿"
+                    android:textSize="14sp"
+                    android:textColor="#CCCCCC" />
+                <TextView
+                    android:id="@+id/value_brightness"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="✅"
+                    android:textSize="14sp"
+                    android:textColor="#E94560" />
+            </LinearLayout>
+
+            <!-- 降噪 -->
+            <LinearLayout
+                android:id="@+id/toggle_denoise"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_card"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="降噪"
+                    android:textSize="14sp"
+                    android:textColor="#CCCCCC" />
+                <TextView
+                    android:id="@+id/value_denoise"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="✅ 低"
+                    android:textSize="14sp"
+                    android:textColor="#E94560" />
+            </LinearLayout>
+
+            <!-- 锐化 -->
+            <LinearLayout
+                android:id="@+id/toggle_sharpen"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_card"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="锐化"
+                    android:textSize="14sp"
+                    android:textColor="#CCCCCC" />
+                <TextView
+                    android:id="@+id/value_sharpen"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="✅ 低"
+                    android:textSize="14sp"
+                    android:textColor="#E94560" />
+            </LinearLayout>
+
+            <!-- 保存优化后图片 -->
+            <LinearLayout
+                android:id="@+id/toggle_save_optimized"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_card"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="保存优化后图片"
+                    android:textSize="14sp"
+                    android:textColor="#CCCCCC" />
+                <TextView
+                    android:id="@+id/value_save_optimized"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="❌"
+                    android:textSize="14sp"
+                    android:textColor="#888888" />
+            </LinearLayout>
+
+            <!-- 录像时启用优化 -->
+            <LinearLayout
+                android:id="@+id/toggle_record_optimized"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_card"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="录像时启用优化"
+                    android:textSize="14sp"
+                    android:textColor="#CCCCCC" />
+                <TextView
+                    android:id="@+id/value_record_optimized"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="✅"
+                    android:textSize="14sp"
+                    android:textColor="#E94560" />
+            </LinearLayout>
+
+            <!-- 显示 FPS -->
+            <LinearLayout
+                android:id="@+id/toggle_fps"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_card"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="显示帧率 (FPS)"
+                    android:textSize="14sp"
+                    android:textColor="#CCCCCC" />
+                <TextView
+                    android:id="@+id/value_fps"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="❌"
+                    android:textSize="14sp"
+                    android:textColor="#888888" />
+            </LinearLayout>
+
+        </LinearLayout>
+    </ScrollView>
+
+    <!-- 底部提示 -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="按返回键关闭面板"
+        android:textSize="12sp"
+        android:textColor="#666688"
+        android:gravity="center"
+        android:layout_marginTop="8dp" />
+</LinearLayout>

@@ -11,22 +11,25 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.ListView;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /**
  * 主界面 - 摄像头选择
- * 显示所有可用摄像头，支持遥控器选择
+ *
+ * 功能：
+ * - 首次使用：单摄像头自动进入预览，多摄像头显示选择列表
+ * - 再次使用：直接进入上次选择的摄像头（跳过选择）
+ * - 摄像头卡片式布局，聚焦缩放动画
  */
 public class MainActivity extends Activity {
     private ListView cameraListView;
     private Button galleryButton;
     private TextView emptyHint;
+    private TextView statusText;
     private List<CameraItem> cameraItems = new ArrayList<>();
-
-    // 防止重复启动 CameraActivity
+    private CameraPreferences preferences;
     private volatile boolean isStartingCamera = false;
 
     @Override
@@ -34,31 +37,32 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        preferences = new CameraPreferences(this);
+
         cameraListView = findViewById(R.id.camera_list);
         galleryButton = findViewById(R.id.btn_gallery);
         emptyHint = findViewById(R.id.empty_hint);
-
-        enumerateCameras();
+        statusText = findViewById(R.id.status_text);
 
         galleryButton.setOnClickListener(v ->
-                startActivity(new Intent(MainActivity.this, GalleryActivity.class)));
+                startActivity(new Intent(this, GalleryActivity.class)));
 
-        // ListView 点击事件（触摸模式 + 遥控器确认键）
         cameraListView.setOnItemClickListener((parent, view, position, id) -> {
             openCamera(position);
         });
-
-        cameraListView.requestFocus();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         isStartingCamera = false;
-        enumerateCameras();
+        enumerateAndAutoEnter();
     }
 
-    private void enumerateCameras() {
+    /**
+     * 枚举摄像头并判断是否自动进入
+     */
+    private void enumerateAndAutoEnter() {
         List<String> ids = CameraHelper.getCameraIds(this);
         cameraItems.clear();
 
@@ -72,13 +76,39 @@ public class MainActivity extends Activity {
         if (cameraItems.isEmpty()) {
             emptyHint.setVisibility(View.VISIBLE);
             cameraListView.setVisibility(View.GONE);
-            Toast.makeText(this, "未检测到摄像头", Toast.LENGTH_LONG).show();
+            statusText.setText("未检测到摄像头");
             return;
         }
 
         emptyHint.setVisibility(View.GONE);
         cameraListView.setVisibility(View.VISIBLE);
 
+        // ===== 自动进入逻辑 =====
+        // 1. 只有一个摄像头 → 直接进入
+        if (cameraItems.size() == 1) {
+            statusText.setText("已自动选择摄像头");
+            openCamera(0);
+            return;
+        }
+
+        // 2. 有上次使用的摄像头 → 直接进入
+        String lastId = preferences.getLastCameraId();
+        if (lastId != null) {
+            for (int i = 0; i < cameraItems.size(); i++) {
+                if (cameraItems.get(i).id.equals(lastId)) {
+                    statusText.setText("已恢复上次选择");
+                    openCamera(i);
+                    return;
+                }
+            }
+        }
+
+        // 3. 多个摄像头，无记忆 → 显示选择列表
+        statusText.setText("选择摄像头（" + cameraItems.size() + " 个可用）");
+        populateList();
+    }
+
+    private void populateList() {
         ArrayAdapter<CameraItem> adapter = new ArrayAdapter<CameraItem>(
                 this, R.layout.item_camera, R.id.camera_name, cameraItems) {
             @Override
@@ -100,6 +130,7 @@ public class MainActivity extends Activity {
         };
 
         cameraListView.setAdapter(adapter);
+        cameraListView.requestFocus();
     }
 
     private void openCamera(int position) {
@@ -115,12 +146,6 @@ public class MainActivity extends Activity {
         startActivity(intent);
     }
 
-    /**
-     * 遥控器按键处理
-     * 作为 onItemClickListener 的备用方案：
-     * 某些 TV 系统的 ListView 对 DPAD_CENTER 的处理不一致，
-     * 直接在 onKeyDown 中捕获确保一定能触发。
-     */
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {

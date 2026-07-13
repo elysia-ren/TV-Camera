@@ -2,9 +2,12 @@ package com.tvcamera.app;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.graphics.Rect;
@@ -31,13 +34,19 @@ import android.util.Size;
 import android.view.KeyEvent;
 import android.view.Surface;
 import android.view.TextureView;
+import android.view.View;
 import android.view.WindowManager;
+import android.view.animation.Animation;
+import android.view.animation.AnimationUtils;
 import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -52,22 +61,24 @@ import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-/**
- * 相机预览 + 拍照界面
- *
- * 架构设计（解决 JPEG 格式双 Surface 兼容问题）：
- * - 预览会话：TextureView + ImageReader 都加入 Session，但预览请求只输出到 TextureView
- * - 拍照：YUV 模式从 ImageReader 持续更新的帧中取最新；JPEG 模式用单次 capture 请求取一帧
- * - ImageReader 不参与预览流，只在拍照时工作，避免格式冲突导致 onConfigureFailed
- */
 public class CameraActivity extends Activity {
     private static final String TAG = "CameraActivity";
     private static final int REQUEST_CAMERA_PERMISSION = 100;
     private static final int REQUEST_STORAGE_PERMISSION = 101;
+    private static final long CONTROL_HIDE_DELAY = 4000;
 
     private TextureView previewView;
-    private TextView statusText;
     private Button captureButton;
+    private Button recordButton;
+    private Button qualityButton;
+    private Button galleryButton;
+    private LinearLayout controlBar;
+    private TextView cameraLabel;
+    private TextView resolutionLabel;
+    private TextView storageLabel;
+    private TextView recordingTime;
+    private TextView fpsLabel;
+    private View recordingDot;
 
     private CameraDevice cameraDevice;
     private CameraCaptureSession captureSession;
@@ -80,11 +91,32 @@ public class CameraActivity extends Activity {
     private Size previewSize;
     private int chosenImageFormat = ImageFormat.YUV_420_888;
 
+    private List<String> availableCameraIds = new ArrayList<>();
+    private List<String> availableCameraNames = new ArrayList<>();
+
     private HandlerThread backgroundThread;
     private Handler backgroundHandler;
+    private Handler mainHandler = new Handler();
+
+    private VideoRecorderHelper videoRecorder = new VideoRecorderHelper();
+    private boolean isRecordingVideo = false;
+    private long recordingStartTime = 0;
+    private Runnable recordingTimerRunnable;
+
+    private ImageProcessor imageProcessor;
+    private QualityPreferences qualityPrefs;
+    private boolean qualityPanelOpen = false;
+
+    private Runnable hideControlRunnable;
+    private boolean controlsVisible = true;
+    private boolean previewStarted = false;
 
     private volatile boolean isPreviewing = false;
     private volatile boolean isOpening = false;
+    private CameraPreferences preferences;
+
+    private Runnable fpsUpdateRunnable;
+    private Surface cachedRenderSurface;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -92,34 +124,310 @@ public class CameraActivity extends Activity {
         setContentView(R.layout.activity_camera);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
+        preferences = new CameraPreferences(this);
+        qualityPrefs = new QualityPreferences(this);
+
         cameraId = getIntent().getStringExtra("camera_id");
         requestedWidth = getIntent().getIntExtra("width", 1920);
         requestedHeight = getIntent().getIntExtra("height", 1080);
 
+        boolean opencvOk = ImageProcessor.initOpenCV();
+        if (opencvOk) {
+            imageProcessor = new ImageProcessor(qualityPrefs);
+        }
+
+        initViews();
+        setupVideoRecorder();
+        enumerateCameras();
+        updateStorageDisplay();
+
+        previewView.setSurfaceTextureListener(surfaceTextureListener);
+    }
+
+    private void initViews() {
         previewView = findViewById(R.id.preview_view);
-        statusText = findViewById(R.id.status_text);
         captureButton = findViewById(R.id.btn_capture);
+        recordButton = findViewById(R.id.btn_record);
+        qualityButton = findViewById(R.id.btn_quality);
+        galleryButton = findViewById(R.id.btn_gallery);
+        controlBar = findViewById(R.id.control_bar);
+        cameraLabel = findViewById(R.id.camera_label);
+        resolutionLabel = findViewById(R.id.resolution_label);
+        storageLabel = findViewById(R.id.storage_label);
+        recordingTime = findViewById(R.id.recording_time);
+        recordingDot = findViewById(R.id.recording_dot);
+        fpsLabel = findViewById(R.id.fps_label);
 
         captureButton.setOnClickListener(v -> takePhoto());
-        previewView.setSurfaceTextureListener(surfaceTextureListener);
+        recordButton.setOnClickListener(v -> toggleRecording());
+        qualityButton.setOnClickListener(v -> toggleQualityPanel());
+        galleryButton.setOnClickListener(v ->
+                startActivity(new Intent(this, GalleryActivity.class)));
 
-        statusText.setText("正在打开摄像头 " + cameraId + "...");
+        // 控制栏隐藏定时器（预览启动后才开始计时）
+        hideControlRunnable = () -> hideControls();
+
+        // FPS 更新
+        fpsUpdateRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (imageProcessor != null && qualityPrefs.isShowFps()) {
+                    float fps = imageProcessor.getCurrentFps();
+                    fpsLabel.setText(String.format(Locale.getDefault(), "%.1f FPS", fps));
+                    fpsLabel.setVisibility(View.VISIBLE);
+                } else {
+                    fpsLabel.setVisibility(View.GONE);
+                }
+                mainHandler.postDelayed(this, 1000);
+            }
+        };
+        mainHandler.post(fpsUpdateRunnable);
+
+        // 确保面板初始状态正确
+        hideControlRunnable = () -> hideControls();
+    }
+
+    // ==================== 控制栏 ====================
+
+    /** 预览启动后调用，开始控制栏隐藏计时 */
+    private void startHideTimer() {
+        previewStarted = true;
+        resetHideTimer();
+    }
+
+    private void resetHideTimer() {
+        if (!previewStarted) return;
+        mainHandler.removeCallbacks(hideControlRunnable);
+        mainHandler.postDelayed(hideControlRunnable, CONTROL_HIDE_DELAY);
+    }
+
+    private void showControls() {
+        if (!controlsVisible) {
+            controlBar.setVisibility(View.VISIBLE);
+            controlBar.animate().alpha(1.0f).setDuration(200).start();
+            findViewById(R.id.info_overlay).setVisibility(View.VISIBLE);
+            findViewById(R.id.info_overlay).animate().alpha(1.0f).setDuration(200).start();
+            findViewById(R.id.storage_overlay).setVisibility(View.VISIBLE);
+            findViewById(R.id.storage_overlay).animate().alpha(1.0f).setDuration(200).start();
+            controlsVisible = true;
+        }
+        resetHideTimer();
+    }
+
+    private void hideControls() {
+        if (controlsVisible && !isRecordingVideo && !qualityPanelOpen) {
+            controlBar.animate().alpha(0.0f).setDuration(300).withEndAction(() -> {
+                if (!controlsVisible) controlBar.setVisibility(View.INVISIBLE);
+            }).start();
+            findViewById(R.id.info_overlay).animate().alpha(0.0f).setDuration(300).withEndAction(() -> {
+                if (!controlsVisible) findViewById(R.id.info_overlay).setVisibility(View.INVISIBLE);
+            }).start();
+            findViewById(R.id.storage_overlay).animate().alpha(0.0f).setDuration(300).withEndAction(() -> {
+                if (!controlsVisible) findViewById(R.id.storage_overlay).setVisibility(View.INVISIBLE);
+            }).start();
+            controlsVisible = false;
+        }
+    }
+
+    // ==================== 画质设置面板（动态创建，不遮挡布局） ====================
+
+    private View dynamicQualityPanel = null;
+
+    private void toggleQualityPanel() {
+        if (qualityPanelOpen) closeQualityPanel();
+        else openQualityPanel();
+    }
+
+    private void openQualityPanel() {
+        qualityPanelOpen = true;
+
+        // 动态创建面板
+        FrameLayout root = findViewById(android.R.id.content);
+        dynamicQualityPanel = getLayoutInflater().inflate(R.layout.panel_quality, root, false);
+        root.addView(dynamicQualityPanel);
+
+        setupQualityPanelItems();
+        refreshQualityPanel();
+        dynamicQualityPanel.findViewById(R.id.toggle_enabled).requestFocus();
+    }
+
+    private void closeQualityPanel() {
+        qualityPanelOpen = false;
+        if (dynamicQualityPanel != null) {
+            FrameLayout root = findViewById(android.R.id.content);
+            root.removeView(dynamicQualityPanel);
+            dynamicQualityPanel = null;
+        }
+        qualityButton.requestFocus();
+        resetHideTimer();
+    }
+
+    private void setupQualityPanelItems() {
+        View panel = dynamicQualityPanel;
+        if (panel == null) return;
+
+        panel.findViewById(R.id.toggle_enabled).setOnClickListener(v -> {
+            qualityPrefs.setEnabled(!qualityPrefs.isEnabled());
+            refreshQualityPanel();
+        });
+        panel.findViewById(R.id.toggle_white_balance).setOnClickListener(v -> {
+            qualityPrefs.setWhiteBalance(!qualityPrefs.isWhiteBalance());
+            refreshQualityPanel();
+        });
+        panel.findViewById(R.id.toggle_clahe).setOnClickListener(v -> {
+            qualityPrefs.setClahe(!qualityPrefs.isClahe());
+            refreshQualityPanel();
+        });
+        panel.findViewById(R.id.toggle_brightness).setOnClickListener(v -> {
+            qualityPrefs.setBrightness(!qualityPrefs.isBrightness());
+            refreshQualityPanel();
+        });
+        panel.findViewById(R.id.toggle_denoise).setOnClickListener(v -> {
+            if (!qualityPrefs.isDenoise()) {
+                qualityPrefs.setDenoise(true);
+                qualityPrefs.setDenoiseLevel(0);
+            } else if (qualityPrefs.getDenoiseLevel() < 2) {
+                qualityPrefs.setDenoiseLevel(qualityPrefs.getDenoiseLevel() + 1);
+            } else {
+                qualityPrefs.setDenoise(false);
+            }
+            refreshQualityPanel();
+        });
+        panel.findViewById(R.id.toggle_sharpen).setOnClickListener(v -> {
+            if (!qualityPrefs.isSharpen()) {
+                qualityPrefs.setSharpen(true);
+                qualityPrefs.setSharpenLevel(0);
+            } else if (qualityPrefs.getSharpenLevel() < 2) {
+                qualityPrefs.setSharpenLevel(qualityPrefs.getSharpenLevel() + 1);
+            } else {
+                qualityPrefs.setSharpen(false);
+            }
+            refreshQualityPanel();
+        });
+        panel.findViewById(R.id.toggle_save_optimized).setOnClickListener(v -> {
+            qualityPrefs.setSaveOptimized(!qualityPrefs.isSaveOptimized());
+            refreshQualityPanel();
+        });
+        panel.findViewById(R.id.toggle_record_optimized).setOnClickListener(v -> {
+            qualityPrefs.setRecordOptimized(!qualityPrefs.isRecordOptimized());
+            refreshQualityPanel();
+        });
+        panel.findViewById(R.id.toggle_fps).setOnClickListener(v -> {
+            qualityPrefs.setShowFps(!qualityPrefs.isShowFps());
+            refreshQualityPanel();
+        });
+
+        refreshQualityPanel();
+    }
+
+    private void refreshQualityPanel() {
+        View panel = dynamicQualityPanel;
+        if (panel == null) return;
+
+        ((TextView) panel.findViewById(R.id.value_enabled)).setText(
+                qualityPrefs.isEnabled() ? "✅ 开启" : "❌ 关闭");
+        ((TextView) panel.findViewById(R.id.value_white_balance)).setText(
+                qualityPrefs.isWhiteBalance() ? "✅" : "❌");
+        ((TextView) panel.findViewById(R.id.value_clahe)).setText(
+                qualityPrefs.isClahe() ? "✅" : "❌");
+        ((TextView) panel.findViewById(R.id.value_brightness)).setText(
+                qualityPrefs.isBrightness() ? "✅" : "❌");
+        String[] levels = {"低", "中", "高"};
+        ((TextView) panel.findViewById(R.id.value_denoise)).setText(
+                qualityPrefs.isDenoise() ? "✅ " + levels[qualityPrefs.getDenoiseLevel()] : "❌");
+        ((TextView) panel.findViewById(R.id.value_sharpen)).setText(
+                qualityPrefs.isSharpen() ? "✅ " + levels[qualityPrefs.getSharpenLevel()] : "❌");
+        ((TextView) panel.findViewById(R.id.value_save_optimized)).setText(
+                qualityPrefs.isSaveOptimized() ? "✅" : "❌");
+        ((TextView) panel.findViewById(R.id.value_record_optimized)).setText(
+                qualityPrefs.isRecordOptimized() ? "✅" : "❌");
+        ((TextView) panel.findViewById(R.id.value_fps)).setText(
+                qualityPrefs.isShowFps() ? "✅" : "❌");
+    }
+
+    // ==================== 录像 ====================
+
+    private void setupVideoRecorder() {
+        videoRecorder.setCallback(new VideoRecorderHelper.RecordingCallback() {
+            @Override
+            public void onRecordingStarted() {
+                isRecordingVideo = true;
+                runOnUiThread(() -> {
+                    recordButton.setText("⏹ 停止");
+                    captureButton.setEnabled(false);
+                    captureButton.setAlpha(0.5f);
+                    recordingDot.setVisibility(View.VISIBLE);
+                    recordingTime.setVisibility(View.VISIBLE);
+                    startRecordingTimer();
+                    startBlinkingDot();
+                });
+            }
+
+            @Override
+            public void onRecordingStopped(String filePath) {
+                isRecordingVideo = false;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    new Thread(() -> saveVideoToMediaStore(filePath)).start();
+                }
+                runOnUiThread(() -> {
+                    recordButton.setText("🎥 录像");
+                    captureButton.setEnabled(true);
+                    captureButton.setAlpha(1.0f);
+                    recordingDot.setVisibility(View.GONE);
+                    recordingTime.setVisibility(View.GONE);
+                    stopRecordingTimer();
+                    Toast.makeText(CameraActivity.this, "录像已保存", Toast.LENGTH_SHORT).show();
+                    updateStorageDisplay();
+                });
+            }
+
+            @Override
+            public void onRecordingError(String message) {
+                isRecordingVideo = false;
+                runOnUiThread(() -> {
+                    recordButton.setText("🎥 录像");
+                    captureButton.setEnabled(true);
+                    captureButton.setAlpha(1.0f);
+                    recordingDot.setVisibility(View.GONE);
+                    recordingTime.setVisibility(View.GONE);
+                    stopRecordingTimer();
+                    Toast.makeText(CameraActivity.this, message, Toast.LENGTH_LONG).show();
+                });
+            }
+        });
+    }
+
+    private void enumerateCameras() {
+        availableCameraIds.clear();
+        availableCameraNames.clear();
+        for (String id : CameraHelper.getCameraIds(this)) {
+            availableCameraIds.add(id);
+            availableCameraNames.add(CameraHelper.getCameraDescription(this, id));
+        }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         startBackgroundThread();
-        if (previewView.isAvailable()) {
-            openCamera();
-        }
+        if (previewView.isAvailable()) openCamera();
+        updateStorageDisplay();
     }
 
     @Override
     protected void onPause() {
+        if (isRecordingVideo) videoRecorder.stopRecording();
         closeCamera();
         stopBackgroundThread();
         super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        videoRecorder.release();
+        if (imageProcessor != null) imageProcessor.release();
+        mainHandler.removeCallbacksAndMessages(null);
+        super.onDestroy();
     }
 
     private void startBackgroundThread() {
@@ -131,245 +439,251 @@ public class CameraActivity extends Activity {
     private void stopBackgroundThread() {
         if (backgroundThread != null) {
             backgroundThread.quitSafely();
-            try {
-                backgroundThread.join();
-            } catch (InterruptedException e) {
-                Log.e(TAG, "停止后台线程失败", e);
-            }
+            try { backgroundThread.join(); } catch (InterruptedException e) { }
             backgroundThread = null;
         }
     }
 
+    // ==================== 录像计时 ====================
+
+    private void startRecordingTimer() {
+        recordingStartTime = System.currentTimeMillis();
+        recordingTimerRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!isRecordingVideo) return;
+                long elapsed = System.currentTimeMillis() - recordingStartTime;
+                int secs = (int) (elapsed / 1000);
+                recordingTime.setText(String.format(Locale.getDefault(),
+                        "%02d:%02d", secs / 60, secs % 60));
+                mainHandler.postDelayed(this, 1000);
+            }
+        };
+        mainHandler.post(recordingTimerRunnable);
+    }
+
+    private void stopRecordingTimer() {
+        if (recordingTimerRunnable != null) mainHandler.removeCallbacks(recordingTimerRunnable);
+    }
+
+    private void startBlinkingDot() {
+        Animation blink = AnimationUtils.loadAnimation(this, R.anim.fade_out);
+        blink.setRepeatCount(Animation.INFINITE);
+        blink.setRepeatMode(Animation.REVERSE);
+        recordingDot.startAnimation(blink);
+    }
+
+    private void updateStorageDisplay() {
+        long mb = VideoRecorderHelper.getAvailableStorageMB();
+        if (mb >= 0) {
+            storageLabel.setText(mb > 1024
+                    ? String.format(Locale.getDefault(), "存储: %.1f GB", mb / 1024.0)
+                    : "存储: " + mb + " MB");
+        } else {
+            storageLabel.setText("存储: --");
+        }
+    }
+
+    // ==================== TextureView ====================
+
     private final TextureView.SurfaceTextureListener surfaceTextureListener =
             new TextureView.SurfaceTextureListener() {
-                @Override
-                public void onSurfaceTextureAvailable(SurfaceTexture surface, int w, int h) {
-                    openCamera();
-                }
-                @Override
-                public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int w, int h) {
-                    configureTransform(w, h);
-                }
-                @Override
-                public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
-                    return true;
-                }
-                @Override
-                public void onSurfaceTextureUpdated(SurfaceTexture surface) {
-                }
+                @Override public void onSurfaceTextureAvailable(SurfaceTexture s, int w, int h) { openCamera(); }
+                @Override public void onSurfaceTextureSizeChanged(SurfaceTexture s, int w, int h) { configureTransform(w, h); }
+                @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture s) { return true; }
+                @Override public void onSurfaceTextureUpdated(SurfaceTexture s) {}
             };
 
-    /** 打开摄像头（synchronized + 幂等保护） */
+    // ==================== 打开摄像头 ====================
+
     private synchronized void openCamera() {
         if (isOpening || isPreviewing || cameraDevice != null) return;
         isOpening = true;
 
         CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
         try {
-            CameraCharacteristics characteristics = manager.getCameraCharacteristics(cameraId);
-            StreamConfigurationMap map = characteristics.get(
-                    CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-            if (map == null) {
-                Toast.makeText(this, "无法获取摄像头配置", Toast.LENGTH_LONG).show();
-                isOpening = false;
-                finish();
-                return;
-            }
+            CameraCharacteristics chars = manager.getCameraCharacteristics(cameraId);
+            StreamConfigurationMap map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            if (map == null) { isOpening = false; finish(); return; }
 
             chosenImageFormat = chooseImageFormat(map);
-            boolean isYuv = (chosenImageFormat == ImageFormat.YUV_420_888);
-            Log.i(TAG, "图像格式: " + (isYuv ? "YUV_420_888" : "JPEG"));
-
             Size[] outputSizes = map.getOutputSizes(chosenImageFormat);
             if (outputSizes != null && outputSizes.length > 0) {
                 previewSize = chooseBestSize(outputSizes);
             } else {
-                int fallback = isYuv ? ImageFormat.JPEG : ImageFormat.YUV_420_888;
-                outputSizes = map.getOutputSizes(fallback);
-                if (outputSizes != null && outputSizes.length > 0) {
-                    chosenImageFormat = fallback;
-                    previewSize = chooseBestSize(outputSizes);
-                } else {
-                    previewSize = new Size(requestedWidth, requestedHeight);
-                }
+                previewSize = new Size(requestedWidth, requestedHeight);
             }
-            Log.i(TAG, "预览分辨率: " + previewSize.getWidth() + "x" + previewSize.getHeight());
 
-            // 创建 ImageReader（仅用于拍照，不参与预览流）
+            if (imageProcessor != null) {
+                imageProcessor.prepare(previewSize.getWidth(), previewSize.getHeight());
+            }
+
             imageReader = ImageReader.newInstance(
-                    previewSize.getWidth(), previewSize.getHeight(),
-                    chosenImageFormat, 2);
+                    previewSize.getWidth(), previewSize.getHeight(), chosenImageFormat, 2);
             imageReader.setOnImageAvailableListener(imageAvailableListener, backgroundHandler);
 
-            if (checkSelfPermission(Manifest.permission.CAMERA)
-                    != PackageManager.PERMISSION_GRANTED) {
+            preferences.saveLastCameraId(cameraId);
+
+            String fmt = (chosenImageFormat == ImageFormat.YUV_420_888) ? "YUV" : "JPEG";
+            int idx = availableCameraIds.indexOf(cameraId);
+            cameraLabel.setText(idx >= 0 && idx < availableCameraNames.size()
+                    ? availableCameraNames.get(idx) : "摄像头 " + cameraId);
+            resolutionLabel.setText(previewSize.getWidth() + "x" + previewSize.getHeight() + " | " + fmt);
+
+            if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
                 isOpening = false;
-                requestPermissions(
-                        new String[]{Manifest.permission.CAMERA}, REQUEST_CAMERA_PERMISSION);
+                requestPermissions(new String[]{Manifest.permission.CAMERA}, REQUEST_CAMERA_PERMISSION);
                 return;
             }
-
             manager.openCamera(cameraId, stateCallback, backgroundHandler);
-
         } catch (CameraAccessException e) {
             Log.e(TAG, "打开摄像头失败", e);
             isOpening = false;
-            Toast.makeText(this, "打开摄像头失败: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 
     private int chooseImageFormat(StreamConfigurationMap map) {
-        int[] formats = map.getOutputFormats();
-        for (int fmt : formats) {
+        for (int fmt : map.getOutputFormats()) {
             if (fmt == ImageFormat.YUV_420_888) {
-                Size[] sizes = map.getOutputSizes(ImageFormat.YUV_420_888);
-                if (sizes != null && sizes.length > 0) return ImageFormat.YUV_420_888;
+                Size[] s = map.getOutputSizes(ImageFormat.YUV_420_888);
+                if (s != null && s.length > 0) return ImageFormat.YUV_420_888;
             }
         }
-        for (int fmt : formats) {
+        for (int fmt : map.getOutputFormats()) {
             if (fmt == ImageFormat.JPEG) {
-                Size[] sizes = map.getOutputSizes(ImageFormat.JPEG);
-                if (sizes != null && sizes.length > 0) {
-                    Log.w(TAG, "不支持 YUV_420_888，降级 JPEG");
-                    return ImageFormat.JPEG;
-                }
+                Size[] s = map.getOutputSizes(ImageFormat.JPEG);
+                if (s != null && s.length > 0) return ImageFormat.JPEG;
             }
         }
         return ImageFormat.YUV_420_888;
     }
 
     private final CameraDevice.StateCallback stateCallback = new CameraDevice.StateCallback() {
-        @Override
-        public void onOpened(CameraDevice camera) {
-            cameraDevice = camera;
-            isOpening = false;
-            createPreviewSession();
+        @Override public void onOpened(CameraDevice camera) {
+            cameraDevice = camera; isOpening = false; createPreviewSession();
         }
-        @Override
-        public void onDisconnected(CameraDevice camera) {
-            camera.close();
-            cameraDevice = null;
-            isOpening = false;
-            isPreviewing = false;
+        @Override public void onDisconnected(CameraDevice camera) {
+            camera.close(); cameraDevice = null; isOpening = false; isPreviewing = false;
             runOnUiThread(() -> {
-                statusText.setText("摄像头已断开，3秒后返回...");
                 Toast.makeText(CameraActivity.this, "摄像头已断开", Toast.LENGTH_SHORT).show();
                 previewView.postDelayed(() -> finish(), 3000);
             });
         }
-        @Override
-        public void onError(CameraDevice camera, int error) {
-            camera.close();
-            cameraDevice = null;
-            isOpening = false;
-            isPreviewing = false;
+        @Override public void onError(CameraDevice camera, int error) {
+            camera.close(); cameraDevice = null; isOpening = false; isPreviewing = false;
             runOnUiThread(() -> {
-                statusText.setText("摄像头错误(" + error + ")，3秒后返回...");
                 Toast.makeText(CameraActivity.this, "摄像头错误: " + error, Toast.LENGTH_LONG).show();
                 previewView.postDelayed(() -> finish(), 3000);
             });
         }
     };
 
-    /**
-     * 创建预览会话
-     *
-     * 关键：ImageReader Surface 加入 Session（拍照时需要），
-     * 但预览请求只输出到 TextureView，不输出到 ImageReader。
-     * 这样 JPEG 格式的 ImageReader 不会干扰预览流。
-     */
+    // ==================== 预览会话 ====================
+
     private void createPreviewSession() {
         try {
             SurfaceTexture texture = previewView.getSurfaceTexture();
             if (texture == null) return;
-
             texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
             Surface previewSurface = new Surface(texture);
             Surface readerSurface = imageReader.getSurface();
 
-            // 预览请求：只输出到 TextureView
+            boolean optimizationOn = imageProcessor != null && qualityPrefs.isEnabled();
+
             previewBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             previewBuilder.addTarget(previewSurface);
-            // 注意：不添加 readerSurface 到预览请求
+            if (optimizationOn) {
+                previewBuilder.addTarget(readerSurface);
+            }
+            previewBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
+            previewBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
 
-            previewBuilder.set(CaptureRequest.CONTROL_AF_MODE,
-                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
-            previewBuilder.set(CaptureRequest.CONTROL_AE_MODE,
-                    CaptureRequest.CONTROL_AE_MODE_ON);
-
-            // Session 包含两个 Surface（拍照时 ImageReader 需要）
             List<Surface> surfaces = Arrays.asList(previewSurface, readerSurface);
-            cameraDevice.createCaptureSession(surfaces,
-                    new CameraCaptureSession.StateCallback() {
-                @Override
-                public void onConfigured(CameraCaptureSession session) {
+            cameraDevice.createCaptureSession(surfaces, new CameraCaptureSession.StateCallback() {
+                @Override public void onConfigured(CameraCaptureSession session) {
                     captureSession = session;
                     try {
-                        session.setRepeatingRequest(
-                                previewBuilder.build(), null, backgroundHandler);
+                        session.setRepeatingRequest(previewBuilder.build(), null, backgroundHandler);
                         isPreviewing = true;
                         runOnUiThread(() -> {
-                            String fmt = (chosenImageFormat == ImageFormat.YUV_420_888)
-                                    ? "YUV" : "JPEG";
-                            statusText.setText("预览中 | " +
-                                    previewSize.getWidth() + "x" + previewSize.getHeight() +
-                                    " | " + fmt + " | 按OK键拍照");
                             configureTransform(previewView.getWidth(), previewView.getHeight());
+                            // 预览启动后开始控制栏隐藏计时
+                            startHideTimer();
                         });
-                    } catch (CameraAccessException e) {
-                        Log.e(TAG, "启动预览失败", e);
-                    }
+                    } catch (CameraAccessException e) { Log.e(TAG, "启动预览失败", e); }
                 }
-                @Override
-                public void onConfigureFailed(CameraCaptureSession session) {
-                    // 修复：关闭摄像头，避免资源泄漏
+                @Override public void onConfigureFailed(CameraCaptureSession session) {
                     closeCamera();
-                    runOnUiThread(() -> {
-                        Toast.makeText(CameraActivity.this,
-                                "预览配置失败", Toast.LENGTH_LONG).show();
-                        statusText.setText("预览配置失败，3秒后返回...");
-                        previewView.postDelayed(() -> finish(), 3000);
-                    });
+                    runOnUiThread(() -> Toast.makeText(CameraActivity.this, "预览配置失败", Toast.LENGTH_LONG).show());
                 }
             }, backgroundHandler);
-
-        } catch (CameraAccessException e) {
-            Log.e(TAG, "创建预览会话失败", e);
-        }
+        } catch (CameraAccessException e) { Log.e(TAG, "创建预览会话失败", e); }
     }
 
-    /**
-     * ImageReader 默认回调（占位）
-     * 预览不输出到 ImageReader，此回调仅在未被临时替换时生效
-     * 实际拍照时 takePhoto() 会临时替换为带 CountDownLatch 的回调
-     */
+    // ==================== ImageReader 回调 ====================
+
     private final ImageReader.OnImageAvailableListener imageAvailableListener = reader -> {
         Image image = reader.acquireLatestImage();
-        if (image != null) image.close();
+        if (image == null) return;
+        try {
+            if (chosenImageFormat == ImageFormat.YUV_420_888 && imageProcessor != null && qualityPrefs.isEnabled()) {
+                byte[] nv21 = YuvToNv21Converter.yuv420ToNv21(image);
+                Bitmap processed = imageProcessor.processFrame(nv21, image.getWidth(), image.getHeight());
+                if (processed != null) renderToTextureView(processed);
+            }
+        } finally {
+            image.close();
+        }
     };
+
+    private void renderToTextureView(Bitmap bitmap) {
+        mainHandler.post(() -> {
+            try {
+                SurfaceTexture surfaceTexture = previewView.getSurfaceTexture();
+                if (surfaceTexture == null) return;
+                if (cachedRenderSurface == null) {
+                    cachedRenderSurface = new Surface(surfaceTexture);
+                }
+                Canvas canvas = null;
+                try {
+                    canvas = cachedRenderSurface.lockCanvas(null);
+                    if (canvas != null) {
+                        canvas.drawColor(android.graphics.Color.BLACK);
+                        float scaleX = (float) canvas.getWidth() / bitmap.getWidth();
+                        float scaleY = (float) canvas.getHeight() / bitmap.getHeight();
+                        float scale = Math.max(scaleX, scaleY);
+                        Matrix matrix = new Matrix();
+                        matrix.setScale(scale, scale);
+                        matrix.postTranslate(
+                                (canvas.getWidth() - bitmap.getWidth() * scale) / 2f,
+                                (canvas.getHeight() - bitmap.getHeight() * scale) / 2f);
+                        canvas.drawBitmap(bitmap, matrix, null);
+                    }
+                } finally {
+                    if (canvas != null) cachedRenderSurface.unlockCanvasAndPost(canvas);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "渲染失败", e);
+                cachedRenderSurface = null;
+            }
+        });
+    }
+
+    // ==================== 拍照 ====================
 
     private boolean hasStoragePermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return true;
-        return checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                == PackageManager.PERMISSION_GRANTED;
+        return checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
     }
 
-    /**
-     * 拍照
-     *
-     * YUV 模式：从 imageReader 发起单次 capture 获取 YUV 帧 → NV21 → JPEG
-     * JPEG 模式：从 imageReader 发起单次 capture 获取 JPEG 字节 → 直接保存
-     */
     private void takePhoto() {
+        if (isRecordingVideo) { Toast.makeText(this, "录像中无法拍照", Toast.LENGTH_SHORT).show(); return; }
         if (!hasStoragePermission()) {
-            requestPermissions(
-                    new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
-                    REQUEST_STORAGE_PERMISSION);
+            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_STORAGE_PERMISSION);
             return;
         }
-
         if (captureSession == null || imageReader == null) {
-            Toast.makeText(this, "摄像头未就绪", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "摄像头未就绪，请稍候", Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -379,94 +693,56 @@ public class CameraActivity extends Activity {
         new Thread(() -> {
             try {
                 byte[] jpegData;
-
-                if (chosenImageFormat == ImageFormat.YUV_420_888) {
-                    // YUV 模式：单次 capture 到 ImageReader 获取 YUV 帧
-                    jpegData = captureYuvAndCompress();
-                } else {
-                    // JPEG 模式：单次 capture 到 ImageReader 获取 JPEG 字节
-                    jpegData = captureJpeg();
-                }
+                if (chosenImageFormat == ImageFormat.YUV_420_888) jpegData = captureYuvAndCompress();
+                else jpegData = captureJpeg();
 
                 if (jpegData == null) {
-                    runOnUiThread(() -> Toast.makeText(this,
-                            "拍照失败：未获取到图像数据", Toast.LENGTH_SHORT).show());
+                    runOnUiThread(() -> Toast.makeText(this, "拍照失败", Toast.LENGTH_SHORT).show());
                     return;
                 }
 
-                String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
-                        .format(new Date());
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    saveWithMediaStore(jpegData, timestamp);
-                } else {
-                    saveToFile(jpegData, timestamp);
-                }
+                String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) saveWithMediaStore(jpegData, timestamp);
+                else saveToFile(jpegData, timestamp);
             } catch (Exception e) {
                 Log.e(TAG, "拍照失败", e);
-                runOnUiThread(() -> Toast.makeText(this,
-                        "拍照失败: " + e.getMessage(), Toast.LENGTH_SHORT).show());
+                runOnUiThread(() -> Toast.makeText(this, "拍照失败: " + e.getMessage(), Toast.LENGTH_SHORT).show());
             } finally {
-                runOnUiThread(() -> {
-                    captureButton.setEnabled(true);
-                    captureButton.setText("📷 拍照");
-                });
+                runOnUiThread(() -> { captureButton.setEnabled(true); captureButton.setText("📷 拍照"); updateStorageDisplay(); });
             }
         }).start();
     }
 
-    /**
-     * YUV 模式拍照：向 ImageReader 发起单次 capture，获取 YUV 帧后压缩为 JPEG
-     */
     private byte[] captureYuvAndCompress() throws CameraAccessException, InterruptedException, IOException {
         final CountDownLatch latch = new CountDownLatch(1);
         final byte[][] result = new byte[1][];
         final int[] dims = new int[2];
 
-        // 临时替换 ImageReader 回调，用 CountDownLatch 等待单帧
         imageReader.setOnImageAvailableListener(reader -> {
             Image image = reader.acquireLatestImage();
             if (image == null) return;
             try {
-                byte[] nv21 = YuvToNv21Converter.yuv420ToNv21(image);
-                result[0] = nv21;
-                dims[0] = image.getWidth();
-                dims[1] = image.getHeight();
-            } finally {
-                image.close();
-                latch.countDown();
-            }
+                result[0] = YuvToNv21Converter.yuv420ToNv21(image);
+                dims[0] = image.getWidth(); dims[1] = image.getHeight();
+            } finally { image.close(); latch.countDown(); }
         }, backgroundHandler);
 
-        // 单次 capture 请求
-        CaptureRequest.Builder captureBuilder =
-                cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
-        captureBuilder.addTarget(imageReader.getSurface());
-        captureBuilder.set(CaptureRequest.CONTROL_AF_MODE,
-                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
-        captureBuilder.set(CaptureRequest.CONTROL_AE_MODE,
-                CaptureRequest.CONTROL_AE_MODE_ON);
-        captureSession.capture(captureBuilder.build(), null, backgroundHandler);
+        CaptureRequest.Builder b = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
+        b.addTarget(imageReader.getSurface());
+        b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
+        captureSession.capture(b.build(), null, backgroundHandler);
 
-        // 等待帧到达（最多 3 秒）
         boolean received = latch.await(3, TimeUnit.SECONDS);
-
-        // 恢复原始回调
         imageReader.setOnImageAvailableListener(imageAvailableListener, backgroundHandler);
-
         if (!received || result[0] == null) return null;
 
-        // NV21 → JPEG
         YuvImage yuvImage = new YuvImage(result[0], ImageFormat.NV21, dims[0], dims[1], null);
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         yuvImage.compressToJpeg(new Rect(0, 0, dims[0], dims[1]), 95, baos);
-        byte[] jpeg = baos.toByteArray();
-        baos.close();
+        byte[] jpeg = baos.toByteArray(); baos.close();
         return jpeg;
     }
 
-    /**
-     * JPEG 模式拍照：向 ImageReader 发起单次 capture，获取 JPEG 字节
-     */
     private byte[] captureJpeg() throws CameraAccessException, InterruptedException {
         final CountDownLatch latch = new CountDownLatch(1);
         final byte[][] result = new byte[1][];
@@ -476,160 +752,265 @@ public class CameraActivity extends Activity {
             if (image == null) return;
             try {
                 ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-                byte[] bytes = new byte[buffer.remaining()];
-                buffer.get(bytes);
-                result[0] = bytes;
-            } finally {
-                image.close();
-                latch.countDown();
-            }
+                result[0] = new byte[buffer.remaining()]; buffer.get(result[0]);
+            } finally { image.close(); latch.countDown(); }
         }, backgroundHandler);
 
-        CaptureRequest.Builder captureBuilder =
-                cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
-        captureBuilder.addTarget(imageReader.getSurface());
-        captureBuilder.set(CaptureRequest.CONTROL_AF_MODE,
-                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
-        captureBuilder.set(CaptureRequest.CONTROL_AE_MODE,
-                CaptureRequest.CONTROL_AE_MODE_ON);
-        captureSession.capture(captureBuilder.build(), null, backgroundHandler);
+        CaptureRequest.Builder b = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
+        b.addTarget(imageReader.getSurface());
+        captureSession.capture(b.build(), null, backgroundHandler);
 
         boolean received = latch.await(3, TimeUnit.SECONDS);
-
         imageReader.setOnImageAvailableListener(imageAvailableListener, backgroundHandler);
-
         return (received && result[0] != null) ? result[0] : null;
     }
 
+    // ==================== 录像 ====================
+
+    private void toggleRecording() { if (isRecordingVideo) stopRecording(); else startRecording(); }
+
+    private void startRecording() {
+        if (captureSession == null || cameraDevice == null) { Toast.makeText(this, "摄像头未就绪", Toast.LENGTH_SHORT).show(); return; }
+        if (!hasStoragePermission()) {
+            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_STORAGE_PERMISSION); return;
+        }
+        if (!VideoRecorderHelper.hasEnoughStorage()) { Toast.makeText(this, "存储空间不足", Toast.LENGTH_LONG).show(); return; }
+
+        String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
+        String outputPath;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            File cacheDir = getExternalCacheDir(); if (cacheDir == null) cacheDir = getCacheDir();
+            outputPath = new File(cacheDir, "TVCamera_" + timestamp + ".mp4").getAbsolutePath();
+        } else {
+            File photoDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "TVCamera");
+            if (!photoDir.exists()) photoDir.mkdirs();
+            outputPath = new File(photoDir, "TVCamera_" + timestamp + ".mp4").getAbsolutePath();
+        }
+
+        videoRecorder.startRecording(outputPath, previewSize, cameraId);
+        Surface recorderSurface = videoRecorder.getInputSurface();
+        if (recorderSurface != null) rebuildSessionForRecording(recorderSurface);
+    }
+
+    private void rebuildSessionForRecording(Surface recorderSurface) {
+        try {
+            SurfaceTexture texture = previewView.getSurfaceTexture();
+            if (texture == null) return;
+            texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
+            Surface previewSurface = new Surface(texture);
+
+            if (captureSession != null) { captureSession.close(); captureSession = null; }
+
+            Surface readerSurface = imageReader.getSurface();
+            List<Surface> surfaces = Arrays.asList(previewSurface, recorderSurface, readerSurface);
+
+            cameraDevice.createCaptureSession(surfaces, new CameraCaptureSession.StateCallback() {
+                @Override public void onConfigured(CameraCaptureSession session) {
+                    captureSession = session;
+                    try {
+                        CaptureRequest.Builder rb = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
+                        rb.addTarget(previewSurface);
+                        rb.addTarget(recorderSurface);
+                        rb.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
+                        rb.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+                        session.setRepeatingRequest(rb.build(), null, backgroundHandler);
+                    } catch (CameraAccessException e) { Log.e(TAG, "录像会话失败", e); }
+                }
+                @Override public void onConfigureFailed(CameraCaptureSession session) {
+                    Log.e(TAG, "录像会话配置失败"); videoRecorder.stopRecording();
+                }
+            }, backgroundHandler);
+        } catch (CameraAccessException e) { Log.e(TAG, "重建录像会话失败", e); videoRecorder.stopRecording(); }
+    }
+
+    private void stopRecording() {
+        videoRecorder.stopRecording();
+        rebuildSessionForPreview();
+    }
+
+    private void rebuildSessionForPreview() {
+        try {
+            SurfaceTexture texture = previewView.getSurfaceTexture();
+            if (texture == null) return;
+            texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
+            Surface previewSurface = new Surface(texture);
+            Surface readerSurface = imageReader.getSurface();
+
+            if (captureSession != null) { captureSession.close(); captureSession = null; }
+
+            boolean optimizationOn = imageProcessor != null && qualityPrefs.isEnabled();
+
+            List<Surface> surfaces = Arrays.asList(previewSurface, readerSurface);
+            cameraDevice.createCaptureSession(surfaces, new CameraCaptureSession.StateCallback() {
+                @Override public void onConfigured(CameraCaptureSession session) {
+                    captureSession = session;
+                    try {
+                        previewBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                        previewBuilder.addTarget(previewSurface);
+                        if (optimizationOn) previewBuilder.addTarget(readerSurface);
+                        previewBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
+                        previewBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+                        session.setRepeatingRequest(previewBuilder.build(), null, backgroundHandler);
+                    } catch (CameraAccessException e) { Log.e(TAG, "恢复预览失败", e); }
+                }
+                @Override public void onConfigureFailed(CameraCaptureSession session) { Log.e(TAG, "恢复预览失败"); }
+            }, backgroundHandler);
+        } catch (CameraAccessException e) { Log.e(TAG, "重建预览失败", e); }
+    }
+
+    // ==================== 文件保存 ====================
+
     private void saveToFile(byte[] jpegData, String timestamp) throws IOException {
-        File photoDir = new File(Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_DCIM), "TVCamera");
+        File photoDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "TVCamera");
         if (!photoDir.exists()) photoDir.mkdirs();
-
         File photoFile = new File(photoDir, "TVCamera_" + timestamp + ".jpg");
-        FileOutputStream fos = new FileOutputStream(photoFile);
-        fos.write(jpegData);
-        fos.close();
-
-        runOnUiThread(() -> Toast.makeText(this, "已保存: " + photoFile.getName(),
-                Toast.LENGTH_SHORT).show());
+        FileOutputStream fos = new FileOutputStream(photoFile); fos.write(jpegData); fos.close();
+        runOnUiThread(() -> Toast.makeText(this, "已保存: " + photoFile.getName(), Toast.LENGTH_SHORT).show());
     }
 
     private void saveWithMediaStore(byte[] jpegData, String timestamp) {
         ContentValues values = new ContentValues();
         values.put(MediaStore.Images.Media.DISPLAY_NAME, "TVCamera_" + timestamp + ".jpg");
         values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
-        values.put(MediaStore.Images.Media.RELATIVE_PATH,
-                Environment.DIRECTORY_DCIM + "/TVCamera");
+        values.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/TVCamera");
         values.put(MediaStore.Images.Media.IS_PENDING, 1);
 
-        Uri uri = getContentResolver().insert(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-        if (uri == null) {
-            runOnUiThread(() -> Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show());
-            return;
-        }
+        Uri uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+        if (uri == null) { runOnUiThread(() -> Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show()); return; }
 
         try (OutputStream os = getContentResolver().openOutputStream(uri)) {
-            if (os == null) {
-                getContentResolver().delete(uri, null, null);
-                runOnUiThread(() -> Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show());
-                return;
-            }
+            if (os == null) { getContentResolver().delete(uri, null, null); return; }
             os.write(jpegData);
             ContentValues update = new ContentValues();
             update.put(MediaStore.Images.Media.IS_PENDING, 0);
             getContentResolver().update(uri, update, null, null);
             runOnUiThread(() -> Toast.makeText(this, "已保存到相册", Toast.LENGTH_SHORT).show());
         } catch (IOException e) {
-            Log.e(TAG, "保存失败", e);
             getContentResolver().delete(uri, null, null);
             runOnUiThread(() -> Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show());
         }
     }
 
+    private void saveVideoToMediaStore(String cacheFilePath) {
+        File cacheFile = new File(cacheFilePath);
+        if (!cacheFile.exists() || cacheFile.length() == 0) return;
+
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Video.Media.DISPLAY_NAME, cacheFile.getName());
+        values.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4");
+        values.put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/TVCamera");
+        values.put(MediaStore.Video.Media.IS_PENDING, 1);
+
+        Uri uri = getContentResolver().insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
+        if (uri == null) return;
+
+        try (OutputStream os = getContentResolver().openOutputStream(uri);
+             FileInputStream fis = new FileInputStream(cacheFile)) {
+            if (os == null) { getContentResolver().delete(uri, null, null); return; }
+            byte[] buf = new byte[8192]; int len;
+            while ((len = fis.read(buf)) != -1) os.write(buf, 0, len);
+            ContentValues update = new ContentValues();
+            update.put(MediaStore.Video.Media.IS_PENDING, 0);
+            getContentResolver().update(uri, update, null, null);
+        } catch (IOException e) {
+            getContentResolver().delete(uri, null, null);
+        } finally { cacheFile.delete(); }
+    }
+
+    // ==================== 摄像头切换 ====================
+
+    private void showCameraSwitchDialog() {
+        if (isRecordingVideo) { Toast.makeText(this, "录像中无法切换", Toast.LENGTH_SHORT).show(); return; }
+        if (availableCameraIds.size() <= 1) { Toast.makeText(this, "只有一个摄像头", Toast.LENGTH_SHORT).show(); return; }
+
+        new AlertDialog.Builder(this)
+                .setTitle("切换摄像头")
+                .setItems(availableCameraNames.toArray(new String[0]), (dialog, which) -> {
+                    String newId = availableCameraIds.get(which);
+                    if (!newId.equals(cameraId)) {
+                        closeCamera(); cameraId = newId; preferences.saveLastCameraId(cameraId); openCamera();
+                    }
+                })
+                .setNegativeButton("取消", null).show();
+    }
+
+    // ==================== 资源管理 ====================
+
     private void closeCamera() {
-        isPreviewing = false;
-        isOpening = false;
-        if (captureSession != null) {
-            captureSession.close();
-            captureSession = null;
-        }
-        if (cameraDevice != null) {
-            cameraDevice.close();
-            cameraDevice = null;
-        }
-        if (imageReader != null) {
-            imageReader.close();
-            imageReader = null;
-        }
+        isPreviewing = false; isOpening = false;
+        if (captureSession != null) { captureSession.close(); captureSession = null; }
+        if (cameraDevice != null) { cameraDevice.close(); cameraDevice = null; }
+        if (imageReader != null) { imageReader.close(); imageReader = null; }
+        if (cachedRenderSurface != null) { cachedRenderSurface.release(); cachedRenderSurface = null; }
     }
 
     private void configureTransform(int viewWidth, int viewHeight) {
         if (previewView == null || previewSize == null || viewWidth == 0 || viewHeight == 0) return;
-
-        int bufW = previewSize.getWidth();
-        int bufH = previewSize.getHeight();
         Matrix matrix = new Matrix();
-        float scaleX = (float) viewWidth / bufW;
-        float scaleY = (float) viewHeight / bufH;
+        float scaleX = (float) viewWidth / previewSize.getWidth();
+        float scaleY = (float) viewHeight / previewSize.getHeight();
         float scale = Math.max(scaleX, scaleY);
-        float dx = (viewWidth - bufW * scale) / 2f;
-        float dy = (viewHeight - bufH * scale) / 2f;
         matrix.setScale(scale, scale);
-        matrix.postTranslate(dx, dy);
+        matrix.postTranslate((viewWidth - previewSize.getWidth() * scale) / 2f,
+                (viewHeight - previewSize.getHeight() * scale) / 2f);
         previewView.setTransform(matrix);
     }
 
     private Size chooseBestSize(Size[] sizes) {
         List<Size> sorted = new ArrayList<>(Arrays.asList(sizes));
-        Collections.sort(sorted, (a, b) ->
-                b.getWidth() * b.getHeight() - a.getWidth() * a.getHeight());
-        for (Size s : sorted)
-            if (s.getWidth() == 1920 && s.getHeight() == 1080) return s;
-        for (Size s : sorted)
-            if (s.getWidth() == 1280 && s.getHeight() == 720) return s;
-        for (Size s : sorted)
-            if (s.getWidth() == 640 && s.getHeight() == 480) return s;
+        Collections.sort(sorted, (a, b) -> b.getWidth() * b.getHeight() - a.getWidth() * a.getHeight());
+        for (Size s : sorted) if (s.getWidth() == 1920 && s.getHeight() == 1080) return s;
+        for (Size s : sorted) if (s.getWidth() == 1280 && s.getHeight() == 720) return s;
+        for (Size s : sorted) if (s.getWidth() == 640 && s.getHeight() == 480) return s;
         return sorted.get(0);
     }
 
+    // ==================== 按键 ====================
+
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
+        showControls();
+
+        if (qualityPanelOpen) {
+            if (keyCode == KeyEvent.KEYCODE_BACK) { closeQualityPanel(); return true; }
+            return super.onKeyDown(keyCode, event);
+        }
+
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_CAMERA:
-                takePhoto();
-                return true;
+                takePhoto(); return true;
             case KeyEvent.KEYCODE_BACK:
-                finish();
-                return true;
+                if (isRecordingVideo) { stopRecording(); return true; }
+                finish(); return true;
             case KeyEvent.KEYCODE_MENU:
-                startActivity(new Intent(this, GalleryActivity.class));
-                return true;
+                showCameraSwitchDialog(); return true;
         }
         return super.onKeyDown(keyCode, event);
     }
 
     @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions,
-                                           int[] grantResults) {
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_DPAD_LEFT: case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_DPAD_UP: case KeyEvent.KEYCODE_DPAD_DOWN:
+                resetHideTimer(); break;
+        }
+        return super.onKeyUp(keyCode, event);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         if (requestCode == REQUEST_CAMERA_PERMISSION) {
-            if (grantResults.length > 0
-                    && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 previewView.post(this::openCamera);
-            } else {
-                Toast.makeText(this, "需要摄像头权限", Toast.LENGTH_LONG).show();
-                finish();
-            }
+            } else { Toast.makeText(this, "需要摄像头权限", Toast.LENGTH_LONG).show(); finish(); }
         } else if (requestCode == REQUEST_STORAGE_PERMISSION) {
-            if (grantResults.length > 0
-                    && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                takePhoto();
-            } else {
-                Toast.makeText(this, "需要存储权限才能保存照片", Toast.LENGTH_LONG).show();
-            }
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                // 用户手动触发
+            } else { Toast.makeText(this, "需要存储权限", Toast.LENGTH_LONG).show(); }
         }
     }
 }

@@ -2,42 +2,58 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#1A1A2E">
+    android:background="@drawable/bg_gradient">
 
-    <!-- 缩略图列表模式 -->
+    <!-- 缩略图网格模式 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical">
 
-        <TextView
-            android:layout_width="wrap_content"
+        <!-- 标题栏 -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="📷 已拍照片"
-            android:textSize="28sp"
-            android:textColor="#FFFFFF"
-            android:textStyle="bold"
-            android:padding="24dp" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="24dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="🖼 "
+                android:textSize="28sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="已拍照片和视频"
+                android:textSize="24sp"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/empty_text"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="暂无照片\n请先拍照"
-            android:textSize="20sp"
-            android:textColor="#888888"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:text="暂无照片和视频\n\n去拍一张吧！"
+            android:textSize="22sp"
+            android:textColor="#666688"
             android:gravity="center"
-            android:visibility="gone"
-            android:layout_marginTop="100dp" />
+            android:visibility="gone" />
 
+        <!-- 网格列表 -->
         <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/thumbnail_list"
+            android:id="@+id/thumbnail_grid"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
             android:clipToPadding="false"
             android:padding="16dp" />
 
+        <!-- 底部信息栏 -->
         <TextView
             android:id="@+id/photo_info"
             android:layout_width="match_parent"
@@ -48,7 +64,6 @@
             android:gravity="center"
             android:padding="12dp"
             android:background="#88000000" />
-
     </LinearLayout>
 
     <!-- 全屏查看模式 -->

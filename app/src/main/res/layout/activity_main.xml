@@ -1,59 +1,88 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:background="#FF1A1A2E"
-    android:padding="32dp">
+    android:background="@drawable/bg_gradient">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/app_name"
-        android:textSize="36sp"
-        android:textColor="#FFFFFF"
-        android:textStyle="bold"
-        android:layout_marginBottom="16dp" />
-
-    <TextView
-        android:id="@+id/status_text"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="检测到以下摄像头："
-        android:textSize="18sp"
-        android:textColor="#CCCCCC"
-        android:layout_marginBottom="16dp" />
-
-    <!-- 空列表提示 -->
-    <TextView
-        android:id="@+id/empty_hint"
+    <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:text="未检测到摄像头\n\n请检查：\n1. USB 摄像头是否已连接\n2. 系统是否识别到设备"
-        android:textSize="20sp"
-        android:textColor="#888888"
-        android:gravity="center"
-        android:visibility="gone" />
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="48dp">
 
-    <ListView
-        android:id="@+id/camera_list"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:divider="#333366"
-        android:dividerHeight="2dp"
-        android:nextFocusDown="@id/btn_gallery" />
+        <!-- 标题栏 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="32dp">
 
-    <Button
-        android:id="@+id/btn_gallery"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="📷 查看已拍照片"
-        android:textSize="18sp"
-        android:layout_marginTop="16dp"
-        android:nextFocusUp="@id/camera_list"
-        android:focusable="true"
-        android:focusableInTouchMode="true" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="📷"
+                android:textSize="36sp"
+                android:layout_marginEnd="16dp" />
 
-</LinearLayout>
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/app_name"
+                android:textSize="32sp"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- 提示文字 -->
+        <TextView
+            android:id="@+id/status_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="选择摄像头"
+            android:textSize="18sp"
+            android:textColor="#AAAAAA"
+            android:layout_marginBottom="24dp" />
+
+        <!-- 空列表提示 -->
+        <TextView
+            android:id="@+id/empty_hint"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:text="未检测到摄像头\n\n请检查 USB 摄像头是否已连接"
+            android:textSize="22sp"
+            android:textColor="#666688"
+            android:gravity="center"
+            android:visibility="gone" />
+
+        <!-- 摄像头卡片列表 -->
+        <ListView
+            android:id="@+id/camera_list"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:divider="@android:color/transparent"
+            android:dividerHeight="12dp"
+            android:clipToPadding="false"
+            android:padding="8dp"
+            android:nextFocusDown="@id/btn_gallery" />
+
+        <!-- 底部按钮 -->
+        <Button
+            android:id="@+id/btn_gallery"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:layout_marginTop="24dp"
+            android:background="@drawable/bg_button"
+            android:text="🖼 查看已拍照片和视频"
+            android:textSize="16sp"
+            android:textColor="#FFFFFF"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusUp="@id/camera_list" />
+
+    </LinearLayout>
+</FrameLayout>

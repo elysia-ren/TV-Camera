@@ -6,12 +6,11 @@
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.usb.host" android:required="true" />
 
-    <!--
-        存储权限说明：
-        - Android 9 (API 28) 及以下：需要 WRITE_EXTERNAL_STORAGE 写公共目录
-        - Android 10+ (API 29+)：使用 getExternalFilesDir() 或 MediaStore，不需要存储权限
-        - 此处 maxSdkVersion=28 确保只在 Android 9 及以下申请
-    -->
+    <!-- 录像音频权限（可选，静音录像不需要） -->
+    <!-- 如需有声录像，取消下面的注释，并在 CameraActivity 中动态申请 -->
+    <!-- <uses-permission android:name="android.permission.RECORD_AUDIO" /> -->
+
+    <!-- 存储权限：Android 9 及以下需要 -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -27,7 +26,6 @@
         android:requestLegacyExternalStorage="true"
         android:banner="@drawable/app_banner">
 
-        <!-- 主界面：选择摄像头 -->
         <activity
             android:name=".MainActivity"
             android:screenOrientation="landscape"
@@ -39,13 +37,11 @@
             </intent-filter>
         </activity>
 
-        <!-- 相机预览+拍照 -->
         <activity
             android:name=".CameraActivity"
             android:screenOrientation="landscape"
             android:exported="false" />
 
-        <!-- 内置图库 -->
         <activity
             android:name=".GalleryActivity"
             android:screenOrientation="landscape"

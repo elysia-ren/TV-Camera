@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:focusable="true"
+    android:focusableInTouchMode="true">
+
+    <!-- 缩略图 -->
+    <ImageView
+        android:id="@+id/thumbnail"
+        android:layout_width="match_parent"
+        android:layout_height="180dp"
+        android:scaleType="centerCrop"
+        android:background="#1E1E3A" />
+
+    <!-- 视频标识（右下角） -->
+    <LinearLayout
+        android:id="@+id/video_badge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#AA000000"
+        android:padding="4dp"
+        android:layout_margin="4dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="▶"
+            android:textSize="12sp"
+            android:textColor="#FFFFFF"
+            android:layout_marginEnd="4dp" />
+
+        <TextView
+            android:id="@+id/video_duration"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="00:00"
+            android:textSize="11sp"
+            android:textColor="#FFFFFF" />
+    </LinearLayout>
+
+    <!-- 文件名（底部） -->
+    <TextView
+        android:id="@+id/file_name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:text=""
+        android:textSize="10sp"
+        android:textColor="#CCCCCC"
+        android:background="#88000000"
+        android:padding="4dp"
+        android:maxLines="1"
+        android:ellipsize="end" />
+
+</FrameLayout>

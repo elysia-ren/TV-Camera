@@ -4,14 +4,18 @@ plugins {
 
 android {
     namespace 'com.tvcamera.app'
-    compileSdk 34
+    compileSdk 33
 
     defaultConfig {
         applicationId "com.tvcamera.app"
         minSdk 28
-        targetSdk 30
-        versionCode 1
-        versionName "1.0"
+        targetSdk 33
+        versionCode 2
+        versionName "2.0"
+
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
     }
 
     buildTypes {
@@ -35,4 +39,5 @@ dependencies {
     implementation 'androidx.recyclerview:recyclerview:1.3.2'
     implementation 'com.google.android.material:material:1.9.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'com.quickbirdstudios:opencv:4.5.3.0'
 }

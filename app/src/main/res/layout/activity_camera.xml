@@ -4,48 +4,90 @@
     android:layout_height="match_parent"
     android:background="#000000">
 
-    <!-- 预览容器 -->
-    <FrameLayout
-        android:id="@+id/preview_container"
+    <TextureView
+        android:id="@+id/preview_view"
         android:layout_width="match_parent"
-        android:layout_height="match_parent">
+        android:layout_height="match_parent" />
 
-        <TextureView
-            android:id="@+id/preview_view"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
-
-    </FrameLayout>
-
-    <!-- 底部状态栏 -->
+    <!-- 左上角信息 -->
     <LinearLayout
-        android:layout_width="match_parent"
+        android:id="@+id/info_overlay"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="bottom"
-        android:orientation="horizontal"
+        android:layout_gravity="top|start"
+        android:orientation="vertical"
         android:background="#88000000"
         android:padding="12dp"
-        android:gravity="center_vertical">
+        android:layout_margin="16dp">
+        <TextView android:id="@+id/camera_label"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="摄像头" android:textSize="14sp" android:textColor="#FFFFFF" />
+        <TextView android:id="@+id/resolution_label"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="" android:textSize="12sp" android:textColor="#AAAAAA"
+            android:layout_marginTop="2dp" />
+    </LinearLayout>
 
-        <TextView
-            android:id="@+id/status_text"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="正在初始化..."
-            android:textSize="16sp"
-            android:textColor="#FFFFFF" />
+    <!-- 右上角 -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:orientation="vertical"
+        android:layout_margin="16dp">
+        <TextView android:id="@+id/fps_label"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="" android:textSize="12sp" android:textColor="#00FF00"
+            android:background="#88000000" android:padding="6dp" android:visibility="gone" />
+        <LinearLayout android:id="@+id/storage_overlay"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:orientation="horizontal" android:gravity="center_vertical"
+            android:background="#88000000" android:padding="12dp" android:layout_marginTop="4dp">
+            <View android:id="@+id/recording_dot"
+                android:layout_width="12dp" android:layout_height="12dp"
+                android:background="@drawable/bg_recording_dot" android:visibility="gone"
+                android:layout_marginEnd="8dp" />
+            <TextView android:id="@+id/storage_label"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="存储: --" android:textSize="12sp" android:textColor="#AAAAAA" />
+        </LinearLayout>
+    </LinearLayout>
 
-        <Button
-            android:id="@+id/btn_capture"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="📷 拍照"
-            android:textSize="18sp"
-            android:focusable="true"
-            android:focusableInTouchMode="true"
-            android:minWidth="120dp" />
+    <!-- 录像时间 -->
+    <TextView android:id="@+id/recording_time"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal" android:layout_marginTop="16dp"
+        android:text="00:00" android:textSize="24sp" android:textColor="#FF0000"
+        android:textStyle="bold" android:visibility="gone" android:background="#88000000"
+        android:paddingStart="16dp" android:paddingEnd="16dp"
+        android:paddingTop="4dp" android:paddingBottom="4dp" />
 
+    <!-- 底部控制栏 -->
+    <LinearLayout android:id="@+id/control_bar"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_gravity="bottom" android:orientation="horizontal"
+        android:gravity="center_vertical" android:background="@drawable/bg_control_bar"
+        android:padding="16dp" android:layout_marginStart="32dp"
+        android:layout_marginEnd="32dp" android:layout_marginBottom="16dp">
+        <Button android:id="@+id/btn_capture"
+            android:layout_width="0dp" android:layout_height="48dp" android:layout_weight="1"
+            android:background="@drawable/bg_button" android:text="📷 拍照"
+            android:textSize="16sp" android:textColor="#FFFFFF"
+            android:layout_marginEnd="8dp" />
+        <Button android:id="@+id/btn_record"
+            android:layout_width="0dp" android:layout_height="48dp" android:layout_weight="1"
+            android:background="@drawable/bg_button" android:text="🎥 录像"
+            android:textSize="16sp" android:textColor="#FFFFFF"
+            android:layout_marginEnd="8dp" />
+        <Button android:id="@+id/btn_quality"
+            android:layout_width="0dp" android:layout_height="48dp" android:layout_weight="1"
+            android:background="@drawable/bg_button" android:text="⚙ 画质"
+            android:textSize="16sp" android:textColor="#FFFFFF"
+            android:layout_marginEnd="8dp" />
+        <Button android:id="@+id/btn_gallery"
+            android:layout_width="0dp" android:layout_height="48dp" android:layout_weight="1"
+            android:background="@drawable/bg_button" android:text="🖼 图库"
+            android:textSize="16sp" android:textColor="#FFFFFF" />
     </LinearLayout>
 
 </FrameLayout>

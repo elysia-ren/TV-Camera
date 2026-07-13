@@ -6,22 +6,26 @@ import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.drawable.BitmapDrawable;
+import android.media.ThumbnailUtils;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
 import android.util.Log;
+import android.util.Size;
 import android.view.KeyEvent;
+import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.view.animation.AlphaAnimation;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 import android.widget.ViewFlipper;
 
-import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import java.io.File;
@@ -33,33 +37,45 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * 内置图库 - 照片查看器
+ * 内置图库 - 照片和视频查看器
  *
- * 照片加载策略：
- * - Android 10+：通过 MediaStore 查询，用 Uri + ContentResolver 直接解码（兼容 Scoped Storage）
- * - Android 9 及以下：直接读取文件系统
- *
- * 保证与 CameraActivity 的保存路径一致
+ * 功能：
+ * - 网格布局显示缩略图
+ * - 照片/视频混排，视频显示时长和播放图标
+ * - 全屏查看照片
+ * - 遥控器操作
  */
 public class GalleryActivity extends Activity {
     private static final String TAG = "GalleryActivity";
 
-    private RecyclerView thumbnailList;
+    private RecyclerView thumbnailGrid;
     private ViewFlipper fullScreenFlipper;
     private TextView photoInfo;
     private TextView emptyText;
 
-    // Android 10+：使用 Uri 列表（通过 ContentResolver 读取）
-    private List<Uri> photoUris = new ArrayList<>();
-    // Android 9 及以下：使用 File 列表（直接读文件）
-    private List<File> photoFiles = new ArrayList<>();
-    // 标记当前使用的模式
-    private boolean useUriMode = false;
+    // 媒体文件信息
+    private static class MediaItem {
+        Uri uri;
+        String name;
+        long size;
+        long dateModified;
+        boolean isVideo;
+        long duration; // 视频时长（毫秒）
 
+        MediaItem(Uri uri, String name, long size, long dateModified, boolean isVideo, long duration) {
+            this.uri = uri;
+            this.name = name;
+            this.size = size;
+            this.dateModified = dateModified;
+            this.isVideo = isVideo;
+            this.duration = duration;
+        }
+    }
+
+    private List<MediaItem> mediaItems = new ArrayList<>();
     private boolean isFullScreen = false;
     private int currentFullScreenIndex = 0;
     private boolean initialLoadDone = false;
-
     private ExecutorService thumbnailExecutor = Executors.newFixedThreadPool(2);
 
     @Override
@@ -68,32 +84,22 @@ public class GalleryActivity extends Activity {
         setContentView(R.layout.activity_gallery);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-        thumbnailList = findViewById(R.id.thumbnail_list);
+        thumbnailGrid = findViewById(R.id.thumbnail_grid);
         fullScreenFlipper = findViewById(R.id.fullscreen_flipper);
         photoInfo = findViewById(R.id.photo_info);
         emptyText = findViewById(R.id.empty_text);
 
-        thumbnailList.setLayoutManager(new LinearLayoutManager(
-                this, LinearLayoutManager.HORIZONTAL, false));
-        thumbnailList.setHasFixedSize(true);
+        thumbnailGrid.setLayoutManager(new GridLayoutManager(this, 4));
+        thumbnailGrid.setHasFixedSize(true);
 
-        AlphaAnimation fadeIn = new AlphaAnimation(0.0f, 1.0f);
-        fadeIn.setDuration(200);
-        AlphaAnimation fadeOut = new AlphaAnimation(1.0f, 0.0f);
-        fadeOut.setDuration(200);
-        fullScreenFlipper.setInAnimation(fadeIn);
-        fullScreenFlipper.setOutAnimation(fadeOut);
-
-        loadPhotos();
+        loadMedia();
         initialLoadDone = true;
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (initialLoadDone) {
-            loadPhotos();
-        }
+        if (initialLoadDone) loadMedia();
     }
 
     @Override
@@ -103,161 +109,162 @@ public class GalleryActivity extends Activity {
         super.onDestroy();
     }
 
-    /** 获取照片总数 */
-    private int getPhotoCount() {
-        return useUriMode ? photoUris.size() : photoFiles.size();
-    }
-
-    /**
-     * 加载照片列表
-     * Android 10+：MediaStore 查询 + Uri 模式
-     * Android 9 及以下：文件系统 + File 模式
-     */
-    private void loadPhotos() {
-        photoUris.clear();
-        photoFiles.clear();
+    private void loadMedia() {
+        mediaItems.clear();
         recycleFlipperBitmaps();
         fullScreenFlipper.removeAllViews();
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            useUriMode = true;
-            loadPhotosFromMediaStore();
+            loadFromMediaStore();
         } else {
-            useUriMode = false;
-            loadPhotosFromFileSystem();
+            loadFromFileSystem();
         }
 
-        if (getPhotoCount() == 0) {
+        if (mediaItems.isEmpty()) {
             emptyText.setVisibility(View.VISIBLE);
-            thumbnailList.setVisibility(View.GONE);
-            photoInfo.setText("暂无照片");
+            thumbnailGrid.setVisibility(View.GONE);
+            photoInfo.setText("暂无照片和视频");
             return;
         }
 
         emptyText.setVisibility(View.GONE);
-        thumbnailList.setVisibility(View.VISIBLE);
+        thumbnailGrid.setVisibility(View.VISIBLE);
 
-        ThumbnailAdapter adapter = new ThumbnailAdapter();
-        thumbnailList.setAdapter(adapter);
-        updatePhotoInfo(0);
+        MediaAdapter adapter = new MediaAdapter();
+        thumbnailGrid.setAdapter(adapter);
+        updateInfo(0);
     }
 
-    /**
-     * Android 10+：通过 MediaStore 查询公共 DCIM/TVCamera 中的照片
-     * 直接存储 content Uri，不解码为 File 路径（兼容 Scoped Storage）
-     */
-    private void loadPhotosFromMediaStore() {
-        String[] projection = {
+    /** Android 10+：从 MediaStore 加载照片和视频 */
+    private void loadFromMediaStore() {
+        ContentResolver resolver = getContentResolver();
+
+        // 查询照片
+        String[] photoProjection = {
                 MediaStore.Images.Media._ID,
                 MediaStore.Images.Media.DISPLAY_NAME,
+                MediaStore.Images.Media.SIZE,
                 MediaStore.Images.Media.DATE_MODIFIED
         };
+        String photoSelection = MediaStore.Images.Media.RELATIVE_PATH + " = ?";
+        String[] photoArgs = {Environment.DIRECTORY_DCIM + "/TVCamera"};
 
-        // 精确匹配 DCIM/TVCamera 目录（避免匹配到 TVCamera2 等其他文件夹）
-        String selection = MediaStore.Images.Media.RELATIVE_PATH + " = ?";
-        String[] selectionArgs = {Environment.DIRECTORY_DCIM + "/TVCamera/"};
-        String sortOrder = MediaStore.Images.Media.DATE_MODIFIED + " DESC";
-
-        ContentResolver resolver = getContentResolver();
         try (Cursor cursor = resolver.query(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                selection,
-                selectionArgs,
-                sortOrder)) {
-
-            if (cursor == null) {
-                Log.w(TAG, "MediaStore 查询返回 null");
-                return;
-            }
-
-            int idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID);
-            int nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME);
-
-            while (cursor.moveToNext()) {
-                long id = cursor.getLong(idColumn);
-                String name = cursor.getString(nameColumn);
-
-                if (name != null && name.startsWith("TVCamera") &&
-                        (name.toLowerCase().endsWith(".jpg") || name.toLowerCase().endsWith(".jpeg"))) {
-
-                    Uri contentUri = Uri.withAppendedPath(
-                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, String.valueOf(id));
-                    photoUris.add(contentUri);
+                photoProjection, photoSelection, photoArgs,
+                MediaStore.Images.Media.DATE_MODIFIED + " DESC")) {
+            if (cursor != null) {
+                int idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID);
+                int nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME);
+                int sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE);
+                int dateCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED);
+                while (cursor.moveToNext()) {
+                    long id = cursor.getLong(idCol);
+                    String name = cursor.getString(nameCol);
+                    if (name != null && name.startsWith("TVCamera")) {
+                        Uri uri = Uri.withAppendedPath(
+                                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, String.valueOf(id));
+                        mediaItems.add(new MediaItem(uri, name,
+                                cursor.getLong(sizeCol), cursor.getLong(dateCol), false, 0));
+                    }
                 }
             }
-
-            Log.i(TAG, "MediaStore 查询到 " + photoUris.size() + " 张照片");
-
-        } catch (Exception e) {
-            Log.e(TAG, "MediaStore 查询失败", e);
         }
+
+        // 查询视频
+        String[] videoProjection = {
+                MediaStore.Video.Media._ID,
+                MediaStore.Video.Media.DISPLAY_NAME,
+                MediaStore.Video.Media.SIZE,
+                MediaStore.Video.Media.DATE_MODIFIED,
+                MediaStore.Video.Media.DURATION
+        };
+        String videoSelection = MediaStore.Video.Media.RELATIVE_PATH + " = ?";
+        String[] videoArgs = {Environment.DIRECTORY_DCIM + "/TVCamera"};
+
+        try (Cursor cursor = resolver.query(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                videoProjection, videoSelection, videoArgs,
+                MediaStore.Video.Media.DATE_MODIFIED + " DESC")) {
+            if (cursor != null) {
+                int idCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID);
+                int nameCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME);
+                int sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE);
+                int dateCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_MODIFIED);
+                int durCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION);
+                while (cursor.moveToNext()) {
+                    long id = cursor.getLong(idCol);
+                    String name = cursor.getString(nameCol);
+                    if (name != null && name.startsWith("TVCamera")) {
+                        Uri uri = Uri.withAppendedPath(
+                                MediaStore.Video.Media.EXTERNAL_CONTENT_URI, String.valueOf(id));
+                        mediaItems.add(new MediaItem(uri, name,
+                                cursor.getLong(sizeCol), cursor.getLong(dateCol),
+                                true, cursor.getLong(durCol)));
+                    }
+                }
+            }
+        }
+
+        // 按时间排序
+        mediaItems.sort((a, b) -> Long.compare(b.dateModified, a.dateModified));
     }
 
-    /** Android 9 及以下：直接读取文件系统 */
-    private void loadPhotosFromFileSystem() {
+    /** Android 9 及以下：从文件系统加载 */
+    private void loadFromFileSystem() {
         File photoDir = new File(Environment.getExternalStoragePublicDirectory(
                 Environment.DIRECTORY_DCIM), "TVCamera");
+        if (!photoDir.exists()) return;
 
-        if (photoDir.exists()) {
-            File[] files = photoDir.listFiles((dir, name) -> {
-                String lower = name.toLowerCase();
-                return lower.endsWith(".jpg") || lower.endsWith(".jpeg");
-            });
-            if (files != null) {
-                Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
-                photoFiles.addAll(Arrays.asList(files));
+        File[] files = photoDir.listFiles();
+        if (files == null) return;
+
+        Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+
+        for (File file : files) {
+            String name = file.getName().toLowerCase();
+            boolean isVideo = name.endsWith(".mp4");
+            boolean isPhoto = name.endsWith(".jpg") || name.endsWith(".jpeg");
+            if (isVideo || isPhoto) {
+                Uri uri = Uri.fromFile(file);
+                mediaItems.add(new MediaItem(uri, file.getName(),
+                        file.length(), file.lastModified() / 1000, isVideo, 0));
             }
         }
     }
 
-    /** 获取指定位置的照片名称 */
-    private String getPhotoName(int position) {
-        if (useUriMode) {
-            // 从 Uri 中提取文件名
-            Uri uri = photoUris.get(position);
-            String lastPath = uri.getLastPathSegment();
-            return lastPath != null ? lastPath : "photo_" + position;
-        } else {
-            return photoFiles.get(position).getName();
+    private void updateInfo(int position) {
+        if (position >= 0 && position < mediaItems.size()) {
+            MediaItem item = mediaItems.get(position);
+            String type = item.isVideo ? "🎬 视频" : "📷 照片";
+            String sizeStr = (item.size / 1024) + "KB";
+            if (item.size > 1024 * 1024) sizeStr = String.format("%.1fMB", item.size / 1048576.0);
+            photoInfo.setText(type + " | " + item.name + " | " + sizeStr +
+                    " | " + (position + 1) + "/" + mediaItems.size());
         }
     }
 
-    /** 获取指定位置的照片大小（KB） */
-    private long getPhotoSizeKb(int position) {
-        if (useUriMode) {
-            // 通过 ContentResolver 获取大小
-            try (Cursor cursor = getContentResolver().query(
-                    photoUris.get(position),
-                    new String[]{MediaStore.Images.Media.SIZE},
-                    null, null, null)) {
-                if (cursor != null && cursor.moveToFirst()) {
-                    int sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE);
-                    return cursor.getLong(sizeCol) / 1024;
-                }
-            }
-            return 0;
-        } else {
-            return photoFiles.get(position).length() / 1024;
-        }
+    private String formatDuration(long ms) {
+        int secs = (int) (ms / 1000);
+        int mins = secs / 60;
+        secs = secs % 60;
+        return String.format("%02d:%02d", mins, secs);
     }
 
-    private void updatePhotoInfo(int position) {
-        int count = getPhotoCount();
-        if (position >= 0 && position < count) {
-            photoInfo.setText(getPhotoName(position) + " | " + getPhotoSizeKb(position) + "KB" +
-                    " | " + (position + 1) + "/" + count);
-        }
-    }
+    // ==================== 全屏查看 ====================
 
     private void showFullScreen(int position) {
+        // 视频暂不支持全屏播放
+        if (mediaItems.get(position).isVideo) {
+            Toast.makeText(this, "暂不支持视频播放", Toast.LENGTH_SHORT).show();
+            return;
+        }
         isFullScreen = true;
         currentFullScreenIndex = position;
         fullScreenFlipper.setVisibility(View.VISIBLE);
-        thumbnailList.setVisibility(View.GONE);
+        thumbnailGrid.setVisibility(View.GONE);
 
-        // 修复：清除 RecyclerView 焦点，防止隐藏状态下拦截按键事件
-        thumbnailList.clearFocus();
+        thumbnailGrid.clearFocus();
         fullScreenFlipper.setFocusable(true);
         fullScreenFlipper.setFocusableInTouchMode(true);
         fullScreenFlipper.requestFocus();
@@ -270,29 +277,31 @@ public class GalleryActivity extends Activity {
         recycleFlipperBitmaps();
         fullScreenFlipper.removeAllViews();
 
-        int count = getPhotoCount();
+        int count = mediaItems.size();
         int start = Math.max(0, centerIndex - 1);
         int end = Math.min(count - 1, centerIndex + 1);
 
         for (int i = start; i <= end; i++) {
+            if (mediaItems.get(i).isVideo) continue; // 跳过视频
+
             ImageView iv = new ImageView(this);
             iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
             iv.setLayoutParams(new ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT));
 
-            Bitmap bitmap = decodeSampledBitmap(i, 1920, 1080);
+            Bitmap bitmap = decodeSampledBitmap(mediaItems.get(i).uri, 1920, 1080);
             iv.setImageBitmap(bitmap);
             fullScreenFlipper.addView(iv);
         }
 
-        fullScreenFlipper.setDisplayedChild(centerIndex - start);
+        fullScreenFlipper.setDisplayedChild(Math.min(centerIndex - start, fullScreenFlipper.getChildCount() - 1));
     }
 
     private void updateFullScreenInfo() {
-        int count = getPhotoCount();
-        photoInfo.setText("全屏 | " + getPhotoName(currentFullScreenIndex) +
-                " | " + (currentFullScreenIndex + 1) + "/" + count +
+        MediaItem item = mediaItems.get(currentFullScreenIndex);
+        photoInfo.setText("全屏 | " + item.name +
+                " | " + (currentFullScreenIndex + 1) + "/" + mediaItems.size() +
                 " | 左右切换 | 返回退出");
     }
 
@@ -301,8 +310,8 @@ public class GalleryActivity extends Activity {
         recycleFlipperBitmaps();
         fullScreenFlipper.removeAllViews();
         fullScreenFlipper.setVisibility(View.GONE);
-        thumbnailList.setVisibility(View.VISIBLE);
-        thumbnailList.requestFocus();
+        thumbnailGrid.setVisibility(View.VISIBLE);
+        thumbnailGrid.requestFocus();
     }
 
     private void recycleFlipperBitmaps() {
@@ -312,35 +321,19 @@ public class GalleryActivity extends Activity {
                 ImageView iv = (ImageView) child;
                 if (iv.getDrawable() instanceof BitmapDrawable) {
                     Bitmap bm = ((BitmapDrawable) iv.getDrawable()).getBitmap();
-                    if (bm != null && !bm.isRecycled()) {
-                        bm.recycle();
-                    }
+                    if (bm != null && !bm.isRecycled()) bm.recycle();
                 }
                 iv.setImageDrawable(null);
             }
         }
     }
 
-    /**
-     * 统一解码入口：根据模式选择 File 解码或 Uri 解码
-     */
-    private Bitmap decodeSampledBitmap(int position, int reqWidth, int reqHeight) {
-        if (useUriMode) {
-            return decodeSampledBitmapFromUri(photoUris.get(position), reqWidth, reqHeight);
-        } else {
-            return decodeSampledBitmapFromFile(photoFiles.get(position), reqWidth, reqHeight);
-        }
-    }
+    // ==================== 位图解码 ====================
 
-    /**
-     * Android 10+：通过 ContentResolver + Uri 解码（兼容 Scoped Storage）
-     * 不依赖文件路径，直接从 MediaStore 读取数据流
-     */
-    private Bitmap decodeSampledBitmapFromUri(Uri uri, int reqWidth, int reqHeight) {
+    private Bitmap decodeSampledBitmap(Uri uri, int reqWidth, int reqHeight) {
         try {
             BitmapFactory.Options options = new BitmapFactory.Options();
             options.inJustDecodeBounds = true;
-
             InputStream is = getContentResolver().openInputStream(uri);
             if (is == null) return null;
             BitmapFactory.decodeStream(is, null, options);
@@ -348,48 +341,36 @@ public class GalleryActivity extends Activity {
 
             options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight);
             options.inJustDecodeBounds = false;
-
             is = getContentResolver().openInputStream(uri);
             if (is == null) return null;
             Bitmap bitmap = BitmapFactory.decodeStream(is, null, options);
             is.close();
             return bitmap;
         } catch (Exception e) {
-            Log.e(TAG, "Uri 解码失败: " + uri, e);
+            Log.e(TAG, "解码失败: " + uri, e);
             return null;
         }
-    }
-
-    /** Android 9 及以下：直接从文件解码 */
-    private Bitmap decodeSampledBitmapFromFile(File file, int reqWidth, int reqHeight) {
-        BitmapFactory.Options options = new BitmapFactory.Options();
-        options.inJustDecodeBounds = true;
-        BitmapFactory.decodeFile(file.getAbsolutePath(), options);
-
-        options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight);
-        options.inJustDecodeBounds = false;
-        return BitmapFactory.decodeFile(file.getAbsolutePath(), options);
     }
 
     private int calculateInSampleSize(BitmapFactory.Options options, int reqWidth, int reqHeight) {
         int height = options.outHeight;
         int width = options.outWidth;
         int inSampleSize = 1;
-
         if (height > reqHeight || width > reqWidth) {
-            int halfHeight = height / 2;
-            int halfWidth = width / 2;
-            while ((halfHeight / inSampleSize) >= reqHeight
-                    && (halfWidth / inSampleSize) >= reqWidth) {
+            int halfH = height / 2;
+            int halfW = width / 2;
+            while ((halfH / inSampleSize) >= reqHeight && (halfW / inSampleSize) >= reqWidth) {
                 inSampleSize *= 2;
             }
         }
         return inSampleSize;
     }
 
+    // ==================== 按键处理 ====================
+
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        int count = getPhotoCount();
+        int count = mediaItems.size();
         if (isFullScreen) {
             switch (keyCode) {
                 case KeyEvent.KEYCODE_DPAD_LEFT:
@@ -417,14 +398,11 @@ public class GalleryActivity extends Activity {
             switch (keyCode) {
                 case KeyEvent.KEYCODE_DPAD_CENTER:
                 case KeyEvent.KEYCODE_ENTER:
-                    View focused = thumbnailList.getFocusedChild();
+                    View focused = thumbnailGrid.getFocusedChild();
                     int pos = focused != null ?
-                            thumbnailList.getChildAdapterPosition(focused) : -1;
-                    if (pos >= 0) {
-                        showFullScreen(pos);
-                    } else if (count > 0) {
-                        showFullScreen(0);
-                    }
+                            thumbnailGrid.getChildAdapterPosition(focused) : -1;
+                    if (pos >= 0) showFullScreen(pos);
+                    else if (count > 0) showFullScreen(0);
                     return true;
                 case KeyEvent.KEYCODE_MENU:
                     finish();
@@ -434,69 +412,102 @@ public class GalleryActivity extends Activity {
         return super.onKeyDown(keyCode, event);
     }
 
-    /** 缩略图适配器 - 异步加载 */
-    private class ThumbnailAdapter extends RecyclerView.Adapter<ThumbnailViewHolder> {
+    // ==================== 适配器 ====================
+
+    private class MediaAdapter extends RecyclerView.Adapter<MediaViewHolder> {
         @Override
-        public ThumbnailViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
-            ImageView iv = new ImageView(GalleryActivity.this);
-            iv.setLayoutParams(new RecyclerView.LayoutParams(320, 240));
-            iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            iv.setFocusable(true);
-            iv.setFocusableInTouchMode(true);
-            return new ThumbnailViewHolder(iv);
+        public MediaViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
+            View view = LayoutInflater.from(GalleryActivity.this)
+                    .inflate(R.layout.item_gallery, parent, false);
+            return new MediaViewHolder(view);
         }
 
         @Override
-        public void onBindViewHolder(ThumbnailViewHolder holder, int position) {
-            ImageView iv = (ImageView) holder.itemView;
-            iv.setImageBitmap(null);
+        public void onBindViewHolder(MediaViewHolder holder, int position) {
+            MediaItem item = mediaItems.get(position);
 
+            holder.fileName.setText(item.name);
+            holder.videoBadge.setVisibility(item.isVideo ? View.VISIBLE : View.GONE);
+            if (item.isVideo && item.duration > 0) {
+                holder.videoDuration.setText(formatDuration(item.duration));
+            }
+
+            // 聚焦动画
+            holder.itemView.setOnFocusChangeListener((v, hasFocus) -> {
+                if (hasFocus) {
+                    v.animate().scaleX(1.08f).scaleY(1.08f).setDuration(150).start();
+                    v.setElevation(12f);
+                    updateInfo(holder.getBindingAdapterPosition());
+                } else {
+                    v.animate().scaleX(1.0f).scaleY(1.0f).setDuration(150).start();
+                    v.setElevation(0f);
+                }
+            });
+
+            holder.itemView.setOnClickListener(v -> {
+                int pos = holder.getBindingAdapterPosition();
+                if (pos != RecyclerView.NO_POSITION) showFullScreen(pos);
+            });
+
+            // 异步加载缩略图
+            holder.thumbnail.setImageBitmap(null);
             final int pos = position;
-
             thumbnailExecutor.execute(() -> {
-                Bitmap thumb = decodeSampledBitmap(pos, 320, 240);
-                iv.post(() -> {
+                Bitmap thumb = null;
+                if (item.isVideo) {
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            thumb = getContentResolver().loadThumbnail(
+                                    item.uri, new Size(320, 180), null);
+                        } else {
+                            // Android 9：使用文件路径（loadFromFileSystem 返回 file:// URI）
+                            String path = item.uri.getPath();
+                            if (path != null) {
+                                thumb = ThumbnailUtils.createVideoThumbnail(
+                                        path, android.provider.MediaStore.Images.Thumbnails.MINI_KIND);
+                            }
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "视频缩略图获取失败", e);
+                    }
+                } else {
+                    thumb = decodeSampledBitmap(item.uri, 320, 180);
+                }
+
+                final Bitmap finalThumb = thumb;
+                holder.thumbnail.post(() -> {
                     if (isFinishing() || isDestroyed()) {
-                        if (thumb != null && !thumb.isRecycled()) thumb.recycle();
+                        if (finalThumb != null && !finalThumb.isRecycled()) finalThumb.recycle();
                         return;
                     }
                     int adapterPos = holder.getBindingAdapterPosition();
                     if (adapterPos == pos && adapterPos != RecyclerView.NO_POSITION) {
-                        iv.setImageBitmap(thumb);
+                        holder.thumbnail.setImageBitmap(finalThumb);
                     } else {
-                        if (thumb != null && !thumb.isRecycled()) {
-                            thumb.recycle();
-                        }
+                        if (finalThumb != null && !finalThumb.isRecycled()) finalThumb.recycle();
                     }
                 });
-            });
-
-            holder.itemView.setOnClickListener(v -> {
-                int adapterPos = holder.getBindingAdapterPosition();
-                if (adapterPos != RecyclerView.NO_POSITION) {
-                    showFullScreen(adapterPos);
-                }
-            });
-            holder.itemView.setOnFocusChangeListener((v, hasFocus) -> {
-                v.setAlpha(hasFocus ? 1.0f : 0.7f);
-                if (hasFocus) {
-                    int adapterPos = holder.getBindingAdapterPosition();
-                    if (adapterPos != RecyclerView.NO_POSITION) {
-                        updatePhotoInfo(adapterPos);
-                    }
-                }
             });
         }
 
         @Override
         public int getItemCount() {
-            return getPhotoCount();
+            return mediaItems.size();
         }
     }
 
-    private static class ThumbnailViewHolder extends RecyclerView.ViewHolder {
-        ThumbnailViewHolder(View itemView) {
+    private static class MediaViewHolder extends RecyclerView.ViewHolder {
+        ImageView thumbnail;
+        LinearLayout videoBadge;
+        TextView videoDuration;
+        TextView fileName;
+
+        MediaViewHolder(View itemView) {
             super(itemView);
+            thumbnail = itemView.findViewById(R.id.thumbnail);
+            videoBadge = itemView.findViewById(R.id.video_badge);
+            videoDuration = itemView.findViewById(R.id.video_duration);
+            fileName = itemView.findViewById(R.id.file_name);
         }
     }
 }
