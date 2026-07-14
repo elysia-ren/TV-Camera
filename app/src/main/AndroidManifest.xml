@@ -11,10 +11,9 @@
     <!-- <uses-permission android:name="android.permission.RECORD_AUDIO" /> -->
 
     <!-- 存储权限：Android 9 及以下需要 -->
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application
         android:allowBackup="true"
@@ -40,11 +39,13 @@
         <activity
             android:name=".CameraActivity"
             android:screenOrientation="landscape"
+            android:launchMode="singleTop"
             android:exported="false" />
 
         <activity
             android:name=".GalleryActivity"
             android:screenOrientation="landscape"
+            android:launchMode="singleTop"
             android:exported="false" />
 
     </application>

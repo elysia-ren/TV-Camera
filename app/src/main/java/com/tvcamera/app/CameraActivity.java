@@ -7,7 +7,6 @@ import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
-import android.graphics.Canvas;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.graphics.Rect;
@@ -40,6 +39,7 @@ import android.view.animation.Animation;
 import android.view.animation.AnimationUtils;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -67,6 +67,7 @@ public class CameraActivity extends Activity {
     private static final long CONTROL_HIDE_DELAY = 4000;
 
     private TextureView previewView;
+    private ImageView processedPreview;
     private Button captureButton;
     private Button recordButton;
     private Button qualityButton;
@@ -116,7 +117,6 @@ public class CameraActivity extends Activity {
     private ResolutionPreferences resolutionPrefs;
 
     private Runnable fpsUpdateRunnable;
-    private Surface cachedRenderSurface;
     private volatile CountDownLatch videoSaveLatch = null;
 
     @Override
@@ -148,6 +148,7 @@ public class CameraActivity extends Activity {
 
     private void initViews() {
         previewView = findViewById(R.id.preview_view);
+        processedPreview = findViewById(R.id.processed_preview);
         captureButton = findViewById(R.id.btn_capture);
         recordButton = findViewById(R.id.btn_record);
         qualityButton = findViewById(R.id.btn_quality);
@@ -163,8 +164,11 @@ public class CameraActivity extends Activity {
         captureButton.setOnClickListener(v -> takePhoto());
         recordButton.setOnClickListener(v -> toggleRecording());
         qualityButton.setOnClickListener(v -> toggleQualityPanel());
-        galleryButton.setOnClickListener(v ->
-                startActivity(new Intent(this, GalleryActivity.class)));
+        galleryButton.setOnClickListener(v -> {
+            Intent intent = new Intent(this, GalleryActivity.class);
+            intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            startActivity(intent);
+        });
 
         // 控制栏隐藏定时器（预览启动后才开始计时）
         hideControlRunnable = () -> hideControls();
@@ -271,6 +275,10 @@ public class CameraActivity extends Activity {
         panel.findViewById(R.id.toggle_enabled).setOnClickListener(v -> {
             qualityPrefs.setEnabled(!qualityPrefs.isEnabled());
             refreshQualityPanel();
+            // 切换优化开关后重建预览会话，切换 Camera2 输出目标
+            closeQualityPanel();
+            closeCamera();
+            previewView.postDelayed(this::openCamera, 300);
         });
         panel.findViewById(R.id.toggle_white_balance).setOnClickListener(v -> {
             qualityPrefs.setWhiteBalance(!qualityPrefs.isWhiteBalance());
@@ -408,10 +416,9 @@ public class CameraActivity extends Activity {
                             resolutionPrefs.saveResolution(cameraId, chosen.getWidth(), chosen.getHeight());
                         }
                         dialog.dismiss();
-                        // 重新打开摄像头应用新分辨率
+                        // 延迟重新打开，等旧相机完全关闭
                         closeCamera();
-                        openCamera();
-                        // 刷新面板显示
+                        previewView.postDelayed(() -> openCamera(), 300);
                         refreshQualityPanel();
                     })
                     .setNegativeButton("取消", null)
@@ -497,7 +504,10 @@ public class CameraActivity extends Activity {
     protected void onResume() {
         super.onResume();
         startBackgroundThread();
-        if (previewView.isAvailable()) openCamera();
+        // 只有摄像头完全关闭时才重新打开
+        if (previewView.isAvailable() && cameraDevice == null && !isOpening) {
+            previewView.postDelayed(this::openCamera, 200);
+        }
         updateStorageDisplay();
     }
 
@@ -697,34 +707,25 @@ public class CameraActivity extends Activity {
         try {
             SurfaceTexture texture = previewView.getSurfaceTexture();
             if (texture == null) return;
-            // 在创建 Surface 之前设置 buffer 为视图尺寸
-            int viewW = previewView.getWidth();
-            int viewH = previewView.getHeight();
-            if (viewW > 0 && viewH > 0) {
-                texture.setDefaultBufferSize(viewW, viewH);
-            } else {
-                // 降级：使用屏幕分辨率
-                android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
-                getWindowManager().getDefaultDisplay().getMetrics(metrics);
-                texture.setDefaultBufferSize(metrics.widthPixels, metrics.heightPixels);
+            // 设置 buffer 为摄像头输出分辨率，让 configureTransform 矩阵做缩放
+            if (previewSize != null) {
+                texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
             }
             Surface previewSurface = new Surface(texture);
             Surface readerSurface = imageReader.getSurface();
 
-            boolean optimizationOn = imageProcessor != null && qualityPrefs.isEnabled();
+            // 统一用 ImageView 显示，隐藏 TextureView
+            runOnUiThread(() -> {
+                previewView.setVisibility(View.INVISIBLE);
+                processedPreview.setVisibility(View.VISIBLE);
+            });
 
+            // 统一输出到 ImageReader，由 listener 渲染到 ImageView
             previewBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
-            if (optimizationOn) {
-                // 优化开启：只输出到 ImageReader，TextureView 由 Canvas 绘制
-                previewBuilder.addTarget(readerSurface);
-            } else {
-                // 优化关闭：只输出到 TextureView
-                previewBuilder.addTarget(previewSurface);
-            }
+            previewBuilder.addTarget(readerSurface);
             previewBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
             previewBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
 
-            // 会话包含所有 Surface，但预览请求只输出到需要的那个
             List<Surface> surfaces = Arrays.asList(previewSurface, readerSurface);
             cameraDevice.createCaptureSession(surfaces, new CameraCaptureSession.StateCallback() {
                 @Override public void onConfigured(CameraCaptureSession session) {
@@ -732,11 +733,7 @@ public class CameraActivity extends Activity {
                     try {
                         session.setRepeatingRequest(previewBuilder.build(), null, backgroundHandler);
                         isPreviewing = true;
-                        runOnUiThread(() -> {
-                            applyPreviewTransform();
-                            // 预览启动后开始控制栏隐藏计时
-                            startHideTimer();
-                        });
+                        runOnUiThread(() -> startHideTimer());
                     } catch (CameraAccessException e) { Log.e(TAG, "启动预览失败", e); }
                 }
                 @Override public void onConfigureFailed(CameraCaptureSession session) {
@@ -754,76 +751,44 @@ public class CameraActivity extends Activity {
         Image image = reader.acquireLatestImage();
         if (image == null) return;
         try {
-            boolean optimizationOn = imageProcessor != null && qualityPrefs.isEnabled();
-            if (optimizationOn && chosenImageFormat == ImageFormat.YUV_420_888) {
+            if (imageProcessor != null && qualityPrefs.isEnabled() && chosenImageFormat == ImageFormat.YUV_420_888) {
                 // 优化开启：OpenCV 处理后渲染
                 byte[] nv21 = YuvToNv21Converter.yuv420ToNv21(image);
                 Bitmap processed = imageProcessor.processFrame(nv21, image.getWidth(), image.getHeight());
-                if (processed != null) renderToTextureView(processed);
+                if (processed != null) renderToImageView(processed);
             } else {
-                // 优化关闭但预览走 readerSurface：直接用原始帧渲染
+                // 优化关闭：直接用原始帧渲染
                 Bitmap raw = imageToBitmap(image);
-                if (raw != null) renderToTextureView(raw);
+                if (raw != null) renderToImageView(raw);
             }
         } finally {
             image.close();
         }
     };
 
-    /** 将 Image 转换为 Bitmap（用于优化关闭时的 Canvas 渲染） */
+    /** Image → Bitmap（优化关闭时用） */
     private Bitmap imageToBitmap(Image image) {
         try {
-            if (image.getFormat() == ImageFormat.JPEG) {
-                ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-                byte[] bytes = new byte[buffer.remaining()];
-                buffer.get(bytes);
-                return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-            } else {
-                // YUV_420_888 → NV21 → Bitmap
-                byte[] nv21 = YuvToNv21Converter.yuv420ToNv21(image);
-                YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                yuvImage.compressToJpeg(new Rect(0, 0, image.getWidth(), image.getHeight()), 90, baos);
-                byte[] jpeg = baos.toByteArray();
-                baos.close();
-                return android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
-            }
+            byte[] nv21 = YuvToNv21Converter.yuv420ToNv21(image);
+            YuvImage yuv = new YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
+            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+            yuv.compressToJpeg(new Rect(0, 0, image.getWidth(), image.getHeight()), 80, baos);
+            byte[] jpeg = baos.toByteArray();
+            baos.close();
+            return android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
         } catch (Exception e) {
             Log.w(TAG, "imageToBitmap失败", e);
             return null;
         }
     }
 
-    private void renderToTextureView(Bitmap bitmap) {
+    private void renderToImageView(Bitmap bitmap) {
         if (bitmap == null) return;
         mainHandler.post(() -> {
             try {
-                SurfaceTexture surfaceTexture = previewView.getSurfaceTexture();
-                if (surfaceTexture == null) return;
-                if (cachedRenderSurface == null) {
-                    cachedRenderSurface = new Surface(surfaceTexture);
-                }
-                Canvas canvas = null;
-                try {
-                    canvas = cachedRenderSurface.lockCanvas(null);
-                    if (canvas != null && canvas.getWidth() > 0 && canvas.getHeight() > 0) {
-                        canvas.drawColor(android.graphics.Color.BLACK);
-                        float scaleX = (float) canvas.getWidth() / bitmap.getWidth();
-                        float scaleY = (float) canvas.getHeight() / bitmap.getHeight();
-                        float scale = Math.max(scaleX, scaleY);
-                        Matrix matrix = new Matrix();
-                        matrix.setScale(scale, scale);
-                        matrix.postTranslate(
-                                (canvas.getWidth() - bitmap.getWidth() * scale) / 2f,
-                                (canvas.getHeight() - bitmap.getHeight() * scale) / 2f);
-                        canvas.drawBitmap(bitmap, matrix, null);
-                    }
-                } finally {
-                    if (canvas != null) cachedRenderSurface.unlockCanvasAndPost(canvas);
-                }
+                processedPreview.setImageBitmap(bitmap);
             } catch (Exception e) {
-                Log.w(TAG, "渲染失败，重建Surface", e);
-                cachedRenderSurface = null;
+                Log.w(TAG, "ImageView渲染失败", e);
             }
         });
     }
@@ -1010,9 +975,7 @@ public class CameraActivity extends Activity {
         try {
             SurfaceTexture texture = previewView.getSurfaceTexture();
             if (texture == null) return;
-            int viewW = previewView.getWidth();
-            int viewH = previewView.getHeight();
-            if (viewW > 0 && viewH > 0) texture.setDefaultBufferSize(viewW, viewH);
+            if (previewSize != null) texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
             Surface previewSurface = new Surface(texture);
 
             if (captureSession != null) { captureSession.close(); captureSession = null; }
@@ -1027,6 +990,7 @@ public class CameraActivity extends Activity {
                         CaptureRequest.Builder rb = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
                         rb.addTarget(previewSurface);
                         rb.addTarget(recorderSurface);
+                        rb.addTarget(readerSurface); // 录像时也往 ImageReader 送帧，保持预览刷新
                         rb.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
                         rb.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
                         session.setRepeatingRequest(rb.build(), null, backgroundHandler);
@@ -1048,15 +1012,17 @@ public class CameraActivity extends Activity {
         try {
             SurfaceTexture texture = previewView.getSurfaceTexture();
             if (texture == null) return;
-            int viewW = previewView.getWidth();
-            int viewH = previewView.getHeight();
-            if (viewW > 0 && viewH > 0) texture.setDefaultBufferSize(viewW, viewH);
+            if (previewSize != null) texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
             Surface previewSurface = new Surface(texture);
             Surface readerSurface = imageReader.getSurface();
 
             if (captureSession != null) { captureSession.close(); captureSession = null; }
 
-            boolean optimizationOn = imageProcessor != null && qualityPrefs.isEnabled();
+            // 统一用 ImageView
+            runOnUiThread(() -> {
+                previewView.setVisibility(View.INVISIBLE);
+                processedPreview.setVisibility(View.VISIBLE);
+            });
 
             List<Surface> surfaces = Arrays.asList(previewSurface, readerSurface);
             cameraDevice.createCaptureSession(surfaces, new CameraCaptureSession.StateCallback() {
@@ -1064,15 +1030,10 @@ public class CameraActivity extends Activity {
                     captureSession = session;
                     try {
                         previewBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
-                        if (optimizationOn) {
-                            previewBuilder.addTarget(readerSurface);
-                        } else {
-                            previewBuilder.addTarget(previewSurface);
-                        }
+                        previewBuilder.addTarget(readerSurface); // 统一输出到 ImageReader
                         previewBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
                         previewBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
                         session.setRepeatingRequest(previewBuilder.build(), null, backgroundHandler);
-                        runOnUiThread(() -> applyPreviewTransform());
                     } catch (CameraAccessException e) { Log.e(TAG, "恢复预览失败", e); }
                 }
                 @Override public void onConfigureFailed(CameraCaptureSession session) { Log.e(TAG, "恢复预览失败"); }
@@ -1170,7 +1131,6 @@ public class CameraActivity extends Activity {
         if (captureSession != null) { captureSession.close(); captureSession = null; }
         if (cameraDevice != null) { cameraDevice.close(); cameraDevice = null; }
         if (imageReader != null) { imageReader.close(); imageReader = null; }
-        if (cachedRenderSurface != null) { cachedRenderSurface.release(); cachedRenderSurface = null; }
     }
 
     private void configureTransform(int viewWidth, int viewHeight) {
@@ -1195,17 +1155,8 @@ public class CameraActivity extends Activity {
         int h = previewView.getHeight();
         if (w > 0 && h > 0) {
             configureTransform(w, h);
-            // 同步 SurfaceTexture buffer 为视图大小，确保 Canvas 渲染路径正确缩放
-            SurfaceTexture st = previewView.getSurfaceTexture();
-            if (st != null) st.setDefaultBufferSize(w, h);
         } else {
-            previewView.post(() -> {
-                int pw = previewView.getWidth();
-                int ph = previewView.getHeight();
-                configureTransform(pw, ph);
-                SurfaceTexture st = previewView.getSurfaceTexture();
-                if (st != null && pw > 0 && ph > 0) st.setDefaultBufferSize(pw, ph);
-            });
+            previewView.post(() -> configureTransform(previewView.getWidth(), previewView.getHeight()));
         }
     }
 

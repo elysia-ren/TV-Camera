@@ -9,6 +9,15 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <!-- 优化开启时用 ImageView 显示处理后的画面，替代 TextureView -->
+    <ImageView
+        android:id="@+id/processed_preview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:visibility="gone"
+        android:background="#000000" />
+
     <!-- 左上角信息 -->
     <LinearLayout
         android:id="@+id/info_overlay"
